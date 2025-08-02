@@ -112,7 +112,7 @@ typedef struct abstract_pvt {
 	AST_DECLARE_STRING_FIELDS(
 		/*! ModemManager identifier for modem */
 		AST_STRING_FIELD(identifier);
-    );
+	);
 } abstract_pvt_t;
 
 /*!
@@ -139,8 +139,8 @@ typedef struct modem_pvt {
 	unsigned int hookstate:1;
 	/*! Unmuted = 0, Muted = 1 */
 	unsigned int muted:1;
-    /*! Modem device */
-    MMModem *device;
+	/*! Modem device */
+	MMModem *device;
 	/*! Set during a reload so that we know to destroy this if it is no longer
 	 *  in the configuration file. */
 	unsigned int destroy:1;
@@ -170,10 +170,10 @@ typedef struct sim_pvt {
 	unsigned int autoanswer:1;
 	/*! Ignore context in the console dial CLI command */
 	unsigned int overridecontext:1;
-    /*! Assigned modem */
-    modem_pvt_t *modem;
-    /*! Sim device */
-    MMSim *device;
+	/*! Assigned modem */
+	modem_pvt_t *modem;
+	/*! Sim device */
+	MMSim *device;
 	/*! Set during a reload so that we know to destroy this if it is no longer
 	 *  in the configuration file. */
 	unsigned int destroy:1;
@@ -257,14 +257,14 @@ static inline sim_pvt_t *unref_sim(sim_pvt_t *pvt)
  */
 static void set_sim_defaults(sim_pvt_t *pvt)
 {
-    ast_string_field_set(pvt, mohinterpret, "default");
-    ast_string_field_set(pvt, context, "default");
-    ast_string_field_set(pvt, exten, "s");
-    ast_string_field_set(pvt, language, "");
-    ast_string_field_set(pvt, parkinglot, "");
+	ast_string_field_set(pvt, mohinterpret, "default");
+	ast_string_field_set(pvt, context, "default");
+	ast_string_field_set(pvt, exten, "s");
+	ast_string_field_set(pvt, language, "");
+	ast_string_field_set(pvt, parkinglot, "");
 
-    pvt->overridecontext = 0;
-    pvt->autoanswer = 0;
+	pvt->overridecontext = 0;
+	pvt->autoanswer = 0;
 }
 
 /*!
@@ -280,7 +280,7 @@ static void store_config_modem(modem_pvt_t *pvt, const char *var, const char *va
 	CV_STRFIELD("identifier", pvt, identifier);
 	CV_STRFIELD("input_device", pvt, input_device);
 	CV_STRFIELD("output_device", pvt, output_device);
-    CV_F("type", NULL);
+	CV_F("type", NULL);
 
 	ast_log(LOG_WARNING, "Unknown option '%s'\n", var);
 
@@ -299,7 +299,7 @@ static modem_pvt_t *find_modem(const char *identifier)
 static void modem_destructor(void *obj)
 {
 	modem_pvt_t *pvt = obj;
-    g_object_unref(pvt->device);
+	g_object_unref(pvt->device);
 	ast_string_field_free_memory(pvt);
 }
 
@@ -312,7 +312,7 @@ static int init_modem(modem_pvt_t *pvt, const char *identifier)
 
 	ast_string_field_set(pvt, identifier, S_OR(identifier, ""));
 
-    pvt->device = NULL;
+	pvt->device = NULL;
 
 	return 0;
 }
@@ -369,7 +369,7 @@ static void store_config_sim(sim_pvt_t *pvt, const char *var, const char *value)
 	CV_BOOL("overridecontext", pvt->overridecontext);
 	CV_STRFIELD("mohinterpret", pvt, mohinterpret);
 	CV_STRFIELD("parkinglot", pvt, parkinglot);
-    CV_F("type", NULL);
+	CV_F("type", NULL);
 
 	ast_log(LOG_WARNING, "Unknown option '%s'\n", var);
 
@@ -388,7 +388,7 @@ static sim_pvt_t *find_sim(const char *identifier)
 static void sim_destructor(void *obj)
 {
 	sim_pvt_t *pvt = obj;
-    g_object_unref(pvt->device);
+	g_object_unref(pvt->device);
 	ast_string_field_free_memory(pvt);
 }
 
@@ -442,9 +442,9 @@ static void debug_print_config(struct ast_config *cfg, const char *name)
 {
 	struct ast_variable *v;
 	for (v = ast_variable_browse(cfg, name); v; v = v->next)
-    {
-        ast_log(LOG_NOTICE, "'%s' => '%s'\n", v->name, v->value);
-    }
+	{
+		ast_log(LOG_NOTICE, "'%s' => '%s'\n", v->name, v->value);
+	}
 }
 
 /*!
@@ -472,54 +472,54 @@ static int load_config(int reload)
 	ao2_callback(sims, OBJ_NODATA, sim_mark_destroy_cb, NULL);
 
 	while ((context = ast_category_browse_filtered(cfg, NULL, context, "type=^modem$"))) {
-        build_modem(cfg, (const char*)context);
+		build_modem(cfg, (const char*)context);
 	}
 
 	while ((context = ast_category_browse_filtered(cfg, NULL, context, "type=^sim$"))) {
-        build_sim(cfg, (const char*)context);
+		build_sim(cfg, (const char*)context);
 	}
 
 	ast_config_destroy(cfg);
 
-    ast_log(LOG_NOTICE, "Loading modems...");
+	ast_log(LOG_NOTICE, "Loading modems...");
 	GList *mm_modems = g_dbus_object_manager_get_objects(G_DBUS_OBJECT_MANAGER(manager));
-    GError *error = NULL;
-    if (mm_modems)
-    {
-        GList *l;
-        for (l = mm_modems; l; l = g_list_next (l)) {
-            MMModem *mm_modem = mm_object_get_modem(MM_OBJECT(l->data));
-            MMSim *mm_sim = mm_modem_get_sim_sync(mm_modem, NULL, &error);
-            if(error) {
-                ast_log(LOG_WARNING, "Failed to initialize modem %s - Sim error (%d) %s\n",
-                    mm_modem_get_path(mm_modem),
-                    error->code, error->message);
-                g_clear_error(&error);
-                g_object_unref(mm_modem);
-                continue;
-            }
-            modem_pvt_t *modem = find_modem(mm_modem_get_device_identifier(mm_modem));
-            if(!modem) {
-                g_object_unref(mm_modem);
-                g_object_unref(mm_sim);
-                continue;
-            }
-            modem->device = mm_modem;
-            ast_log(LOG_NOTICE, "Resolved modem %s at %s",
-                mm_modem_get_device_identifier(mm_modem),
-                mm_modem_get_path(mm_modem));
-            sim_pvt_t *sim = find_sim(mm_sim_get_identifier(mm_sim));
-            if(!sim) {
-                g_object_unref(mm_sim);
-            }
-            ast_log(LOG_NOTICE, "Resolved sim %s at %s",
-                mm_sim_get_identifier(mm_sim),
-                mm_sim_get_path(mm_sim));
-            sim->device = mm_sim;
-            sim->modem = modem;
-        }
-        g_list_free_full(mm_modems, (GDestroyNotify) g_object_unref);
-    }
+	GError *error = NULL;
+	if (mm_modems)
+	{
+		GList *l;
+		for (l = mm_modems; l; l = g_list_next (l)) {
+			MMModem *mm_modem = mm_object_get_modem(MM_OBJECT(l->data));
+			MMSim *mm_sim = mm_modem_get_sim_sync(mm_modem, NULL, &error);
+			if(error) {
+				ast_log(LOG_WARNING, "Failed to initialize modem %s - Sim error (%d) %s\n",
+					mm_modem_get_path(mm_modem),
+					error->code, error->message);
+				g_clear_error(&error);
+				g_object_unref(mm_modem);
+				continue;
+			}
+			modem_pvt_t *modem = find_modem(mm_modem_get_device_identifier(mm_modem));
+			if(!modem) {
+				g_object_unref(mm_modem);
+				g_object_unref(mm_sim);
+				continue;
+			}
+			modem->device = mm_modem;
+			ast_log(LOG_NOTICE, "Resolved modem %s at %s",
+				mm_modem_get_device_identifier(mm_modem),
+				mm_modem_get_path(mm_modem));
+			sim_pvt_t *sim = find_sim(mm_sim_get_identifier(mm_sim));
+			if(!sim) {
+				g_object_unref(mm_sim);
+			}
+			ast_log(LOG_NOTICE, "Resolved sim %s at %s",
+				mm_sim_get_identifier(mm_sim),
+				mm_sim_get_path(mm_sim));
+			sim->device = mm_sim;
+			sim->modem = modem;
+		}
+		g_list_free_full(mm_modems, (GDestroyNotify) g_object_unref);
+	}
 
 	return 0;
 }
@@ -545,29 +545,29 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 	struct ast_channel *chan = NULL;
 	sim_pvt_t *sim;
 
-    ast_log(LOG_NOTICE, "requested type %s, data %s\n", type, data);
+	ast_log(LOG_NOTICE, "requested type %s, data %s\n", type, data);
 
-    const char *number = strchr(data, '/');
-    if(!number) {
-        ast_log(LOG_NOTICE, "Invalid request %s - missing identifier\n", data);
-        return NULL;
-    }
-    number++;
+	const char *number = strchr(data, '/');
+	if(!number) {
+		ast_log(LOG_NOTICE, "Invalid request %s - missing identifier\n", data);
+		return NULL;
+	}
+	number++;
 
-    char *identifier = ast_alloca(number - data + 1);
-    if(!identifier) {
-        ast_log(LOG_ERROR, "Allocation failed\n");
-        return NULL;
-    }
-    strncpy(identifier, data, number - data);
-    identifier[number - data - 1] = '\0';
+	char *identifier = ast_alloca(number - data + 1);
+	if(!identifier) {
+		ast_log(LOG_ERROR, "Allocation failed\n");
+		return NULL;
+	}
+	strncpy(identifier, data, number - data);
+	identifier[number - data - 1] = '\0';
 
 	if (!(sim = find_sim(identifier))) {
 		ast_log(LOG_NOTICE, "Sim '%s' not found\n", identifier);
 		return NULL;
 	}
 
-    ast_log(LOG_NOTICE, "Sim '%s' resolved. (Modem: %s)\n", identifier, sim->modem->identifier);
+	ast_log(LOG_NOTICE, "Sim '%s' resolved. (Modem: %s)\n", identifier, sim->modem->identifier);
 
 	if (!(ast_format_cap_iscompatible(cap, modemmanager_tech.capabilities))) {
 		struct ast_str *cap_buf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
@@ -582,7 +582,7 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 		goto return_unref;
 	}
 
-    /* Todo: create channel */
+	/* Todo: create channel */
 
 	modemmanager_pvt_lock(sim->modem);
 	chan = modemmanager_new(sim->modem, NULL, NULL, AST_STATE_DOWN, assignedids, requestor);
@@ -593,12 +593,12 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 
 return_unref:
 	unref_sim(sim);
-    return NULL;
+	return NULL;
 }
 
 static int modemmanager_hangup(struct ast_channel *c)
 {
-    return 0;
+	return 0;
 }
 
 static struct ast_frame *modemmanager_read(struct ast_channel *chan)
@@ -610,19 +610,19 @@ static struct ast_frame *modemmanager_read(struct ast_channel *chan)
 
 static int modemmanager_call(struct ast_channel *c, const char *dest, int timeout)
 {
-    return 0;
+	return 0;
 }
 
 static int modemmanager_write(struct ast_channel *chan, struct ast_frame *f)
 {
-    return 0;
+	return 0;
 }
 
 static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
 	PaDeviceIndex idx, num, def_input, def_output;
-    GError *error = NULL;
-    int ret;
+	GError *error = NULL;
+	int ret;
 
 	if (cmd == CLI_INIT) {
 		e->command = "modemmanager list available";
@@ -638,55 +638,55 @@ static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli
 
 	ast_cli(a->fd, "\nAvailable modems");
 
-    GList *modems = g_dbus_object_manager_get_objects(G_DBUS_OBJECT_MANAGER(manager));
-    g_print ("\n");
-    if (!modems)
-        ast_cli(a->fd, "\t (none)\n");
-    else {
-        GList *l;
-        for (l = modems; l; l = g_list_next (l)) {
-            MMModem *modem = mm_object_peek_modem(MM_OBJECT(l->data));
-            ast_cli(a->fd, "\nModem '%s'\n"
-                "\tManufacturer: %s\n"
-                "\tModel: %s\n"
-                "\tRevision: %s\n"
-                "\tEquipmentIdentifier: %s\n"
-                "\tState: %d\n"
-                ,
-                mm_modem_get_device_identifier(modem),
-                mm_modem_get_manufacturer(modem),
-                mm_modem_get_model(modem),
-                mm_modem_get_revision(modem),
-                mm_modem_get_equipment_identifier(modem),
-                mm_modem_get_state(modem)
-            );
+	GList *modems = g_dbus_object_manager_get_objects(G_DBUS_OBJECT_MANAGER(manager));
+	g_print ("\n");
+	if (!modems)
+		ast_cli(a->fd, "\t (none)\n");
+	else {
+		GList *l;
+		for (l = modems; l; l = g_list_next (l)) {
+			MMModem *modem = mm_object_peek_modem(MM_OBJECT(l->data));
+			ast_cli(a->fd, "\nModem '%s'\n"
+				"\tManufacturer: %s\n"
+				"\tModel: %s\n"
+				"\tRevision: %s\n"
+				"\tEquipmentIdentifier: %s\n"
+				"\tState: %d\n"
+				,
+				mm_modem_get_device_identifier(modem),
+				mm_modem_get_manufacturer(modem),
+				mm_modem_get_model(modem),
+				mm_modem_get_revision(modem),
+				mm_modem_get_equipment_identifier(modem),
+				mm_modem_get_state(modem)
+			);
 
-            gchar *own_numbers_string = g_strjoinv(", ", (gchar **)mm_modem_get_own_numbers (modem));
-            ast_cli(a->fd, "\tOwnNumbers: %s\n", own_numbers_string);
-            g_free(own_numbers_string);
+			gchar *own_numbers_string = g_strjoinv(", ", (gchar **)mm_modem_get_own_numbers (modem));
+			ast_cli(a->fd, "\tOwnNumbers: %s\n", own_numbers_string);
+			g_free(own_numbers_string);
 
-            MMSim *sim = mm_modem_get_sim_sync(modem, NULL, &error);
-            if(error) {
-                ast_cli(a->fd, "Failed to get Sim - (%d) %s\n",
-                    error->code, error->message);
-                g_clear_error(&error);
-            }
-            else {
-                ast_cli(a->fd, "\tSim %s:\n"
-                    "\t\tImsi: %s\n"
-                    "\t\tOperatorIdentifier: %s\n"
-                    "\t\tOperatorName: %s\n"
-                    ,
-                    mm_sim_get_identifier(sim),
-                    mm_sim_get_imsi(sim),
-                    mm_sim_get_operator_identifier(sim),
-                    mm_sim_get_operator_name(sim)
-                );
-                g_object_unref(sim);
-            }
-        }
-        g_list_free_full(modems, (GDestroyNotify) g_object_unref);
-    }
+			MMSim *sim = mm_modem_get_sim_sync(modem, NULL, &error);
+			if(error) {
+				ast_cli(a->fd, "Failed to get Sim - (%d) %s\n",
+					error->code, error->message);
+				g_clear_error(&error);
+			}
+			else {
+				ast_cli(a->fd, "\tSim %s:\n"
+					"\t\tImsi: %s\n"
+					"\t\tOperatorIdentifier: %s\n"
+					"\t\tOperatorName: %s\n"
+					,
+					mm_sim_get_identifier(sim),
+					mm_sim_get_imsi(sim),
+					mm_sim_get_operator_identifier(sim),
+					mm_sim_get_operator_name(sim)
+				);
+				g_object_unref(sim);
+			}
+		}
+		g_list_free_full(modems, (GDestroyNotify) g_object_unref);
+	}
 
 	ast_cli(a->fd, "\nAvailable audio devices (I: Default input device, i: Input device, O: Default output device, o: Output device)\n\n");
 
@@ -703,10 +703,10 @@ static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli
 		if (!dev)
 			continue;
 		ast_cli(a->fd, "Device '%s' - %s%s\n",
-            dev->name,
-            dev->maxInputChannels ? idx == def_input ? "I" : "i" : "",
-            dev->maxOutputChannels ? idx == def_output ? "O" : "o" : ""
-        );
+			dev->name,
+			dev->maxInputChannels ? idx == def_input ? "I" : "i" : "",
+			dev->maxOutputChannels ? idx == def_output ? "O" : "o" : ""
+		);
 	}
 
 
@@ -724,8 +724,8 @@ static int unload_module(void)
 	ast_channel_unregister(&modemmanager_tech);
 	ast_cli_unregister_multiple(cli_modemmanager, ARRAY_LEN(cli_modemmanager));
 
-    g_object_unref(manager);
-    g_object_unref(dbus);
+	g_object_unref(manager);
+	g_object_unref(dbus);
 
 	Pa_Terminate();
 
@@ -748,8 +748,8 @@ static int unload_module(void)
 static int load_module(void)
 {
 	PaError res;
-    GDBusConnection *connection = NULL;
-    GError *error = NULL;
+	GDBusConnection *connection = NULL;
+	GError *error = NULL;
 
 	if (!(modemmanager_tech.capabilities = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT))) {
 		return AST_MODULE_LOAD_DECLINE;
@@ -766,21 +766,21 @@ static int load_module(void)
 	if (!sims)
 		goto return_error;
 
-    dbus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-    if (error) {
+	dbus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+	if (error) {
 		ast_log(LOG_WARNING, "Failed to connect DBus daemon - (%d) %s\n",
 			error->code, error->message);
-        g_clear_error(&error);
-        goto return_error_dbus_init;
-    }
+		g_clear_error(&error);
+		goto return_error_dbus_init;
+	}
 
-    manager = mm_manager_new_sync(dbus, 0, NULL, &error);
-    if (error) {
+	manager = mm_manager_new_sync(dbus, 0, NULL, &error);
+	if (error) {
 		ast_log(LOG_WARNING, "Failed to create MMManager - (%d) %s\n",
 			error->code, error->message);
-        g_clear_error(&error);
-        goto return_error_mm_init;
-    }
+		g_clear_error(&error);
+		goto return_error_mm_init;
+	}
 
 	if (load_config(0))
 		goto return_error;
@@ -809,7 +809,7 @@ return_error_chan_reg:
 return_error_pa_init:
 	Pa_Terminate();
 return_error_mm_init:
-    g_object_unref(dbus);
+	g_object_unref(dbus);
 return_error_dbus_init:
 return_error:
 	ao2_ref(modemmanager_tech.capabilities, -1);
