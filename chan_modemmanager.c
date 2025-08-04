@@ -314,7 +314,7 @@ static void set_sim_defaults(sim_pvt_t *pvt)
  */
 static void store_config_modem(modem_pvt_t *pvt, const char *var, const char *value)
 {
-	ast_log(LOG_NOTICE, "Storing '%s' => %s\n", var, value);
+	ast_verb(1, "Storing '%s' => %s\n", var, value);
 	if(!ast_jb_read_conf(&pvt->jbconf, var, value)) {
 		return;
 	}
@@ -402,7 +402,7 @@ static int modem_mark_destroy_cb(void *obj, void *arg, int flags)
  */
 static void store_config_sim(sim_pvt_t *pvt, const char *var, const char *value)
 {
-	ast_log(LOG_NOTICE, "Storing '%s' => %s\n", var, value);
+	ast_verb(1, "Storing '%s' => %s\n", var, value);
 	CV_START(var, value);
 
 	CV_STRFIELD("identifier", pvt, identifier);
@@ -495,14 +495,14 @@ static void debug_print_config(struct ast_config *cfg, const char *name)
 static void on_modem_state_changed(MMModem *modem, MMModemState old_state, MMModemState new_state, MMModemStateChangeReason reason, void *data)
 {
 	sim_pvt_t *sim = data;
-	ast_log(LOG_NOTICE, "Modem state changed from %d to %d (Reason: %d / uid: %s)\n", old_state, new_state, reason, sim->identifier);
+	ast_verb(1, "Modem state changed from %d to %d (Reason: %d / uid: %s)\n", old_state, new_state, reason, sim->identifier);
 }
 
 static void on_voice_call_added(MMModemVoice *voice, const char *path, void *data)
 {
 	GError *error = NULL;
 	sim_pvt_t *sim = data;
-	ast_log(LOG_NOTICE, "Call added - %s (uid: %s)\n", path, sim->identifier);
+	ast_verb(1, "Call added - %s (uid: %s)\n", path, sim->identifier);
 
 	GList *calls = mm_modem_voice_list_calls_sync(sim->modem->voice, NULL, &error);
 	if(error) {
@@ -529,7 +529,7 @@ static void on_voice_call_added(MMModemVoice *voice, const char *path, void *dat
 
 	if(mm_call_get_direction(call) == MM_CALL_DIRECTION_INCOMING) {
 		struct ast_channel *chan;
-		ast_log(LOG_NOTICE, "Incoming call from %s to %s (uid: %s)\n", mm_call_get_number(call), sim->exten, sim->identifier);
+		ast_verb(1, "Incoming call from %s to %s (uid: %s)\n", mm_call_get_number(call), sim->exten, sim->identifier);
 		modemmanager_pvt_lock(sim->modem);
 		chan = modemmanager_new(sim, mm_call_dup_number(call), sim->exten, sim->context, AST_STATE_RINGING, NULL, NULL);
 		sim->modem->call = call;
@@ -554,19 +554,19 @@ static int modemmanager_send(const struct ast_msg *msg, const char *to, const ch
 		ast_log(LOG_WARNING, "Invalid to address %s\n", to);
 		return -1;
 	}
-	ast_log(LOG_NOTICE, "addr ok\n");
+	ast_verb(1, "addr ok\n");
 	number[0]='\0';
 	simid[0]='\0';
 	number += 1;
 	simid += 1;
-	ast_log(LOG_NOTICE, "number=%s, simid=%s\n", number, simid);
+	ast_verb(1, "number=%s, simid=%s\n", number, simid);
 	// return;
 	sim_pvt_t *sim = find_sim(simid);
 	if(number == NULL || simid == NULL) {
 		ast_log(LOG_WARNING, "Unable to find sim %s\n", simid);
 		return -1;
 	}
-	ast_log(LOG_NOTICE, "sim ok mid=%s\n", sim->modem->identifier);
+	ast_verb(1, "sim ok mid=%s\n", sim->modem->identifier);
 	MMSmsProperties *props = mm_sms_properties_new();
 	if(props == NULL) {
 		ast_log(LOG_WARNING, "Unable to create sms props %s\n", simid);
@@ -600,7 +600,7 @@ static void on_message_added(MMModemMessaging *messaging, const char *path, gboo
 {
 	GError *error = NULL;
 	sim_pvt_t *sim = data;
-	ast_log(LOG_NOTICE, "Message added - %s Received: %s (uid: %s)\n", path, AST_YESNO(received), sim->identifier);
+	ast_verb(1, "Message added - %s Received: %s (uid: %s)\n", path, AST_YESNO(received), sim->identifier);
 
 	GList *messages = mm_modem_messaging_list_sync(sim->modem->messaging, NULL, &error);
 	if(error) {
@@ -626,8 +626,8 @@ static void on_message_added(MMModemMessaging *messaging, const char *path, gboo
 	}
 
 	if(received) {
-		ast_log(LOG_NOTICE, "Incoming SMS from %s to %s (uid: %s)\n", mm_sms_get_number(message), sim->exten, sim->identifier);
-		ast_log(LOG_NOTICE, "PDU Type %d, SMSC %s, Ref %d, Class %d, TS %s, DCTS %s\n",
+		ast_verb(1, "Incoming SMS from %s to %s (uid: %s)\n", mm_sms_get_number(message), sim->exten, sim->identifier);
+		ast_verb(1, "PDU Type %d, SMSC %s, Ref %d, Class %d, TS %s, DCTS %s\n",
 			mm_sms_get_pdu_type(message),
 			mm_sms_get_smsc(message),
 			mm_sms_get_message_reference(message),
@@ -636,18 +636,14 @@ static void on_message_added(MMModemMessaging *messaging, const char *path, gboo
 			mm_sms_get_discharge_timestamp(message)
 		);
 		const char *text = mm_sms_get_text(message);
-		if(!text) {
-			ast_log(LOG_WARNING, "Failed to retrieve sms text\n");
-			return;
-		}
-		if(strcmp(text, "(null)") == 0) {
+		if(text == NULL || strcmp(text, "(null)") == 0) {
 			/* Possibly MMS but currently we don't implement mms support */
 		}
 		else {
-			ast_log(LOG_NOTICE, "Text %s\n", mm_sms_get_text(message), sim->exten, sim->identifier);
+			ast_verb(1, "Text %s\n", mm_sms_get_text(message), sim->exten, sim->identifier);
 			/* PJSIP method */
 			struct ast_msg *msg = ast_msg_alloc();
-			ast_log(LOG_NOTICE, "Created ast_msg\n");
+			ast_verb(1, "Created ast_msg\n");
 			int res = 0;
 			if (!msg) {
 				ast_log(LOG_WARNING, "Failed to create ast_msg\n");
@@ -710,7 +706,7 @@ static int load_config(int reload)
 
 	ast_config_destroy(cfg);
 
-	ast_log(LOG_NOTICE, "Loading modems...");
+	ast_verb(1, "Loading modems...");
 	GList *mm_objs = g_dbus_object_manager_get_objects(G_DBUS_OBJECT_MANAGER(manager));
 	GError *error = NULL;
 	if (mm_objs)
@@ -723,8 +719,6 @@ static int load_config(int reload)
 			MMModemMessaging *mm_msg = NULL;
 			for(iface=ifaces;iface;iface = g_list_next(iface)) {
 				GDBusInterfaceInfo *info = g_dbus_interface_get_info(G_DBUS_INTERFACE(iface->data));
-				ast_log(LOG_NOTICE, "Dbg DBUS_INTERFACE %s\n",
-					g_dbus_interface_get_info(G_DBUS_INTERFACE(iface->data))->name);
 				if (g_strcmp0(info->name, MM_DBUS_INTERFACE_MODEM) == 0) {
 					mm_modem = mm_object_get_modem(MM_OBJECT(l->data));
 				}
@@ -754,14 +748,14 @@ static int load_config(int reload)
 			modem->device = mm_modem;
 			modem->voice = mm_voice;
 			modem->messaging = mm_msg;
-			ast_log(LOG_NOTICE, "Resolved modem %s at %s",
+			ast_verb(1, "Resolved modem %s at %s",
 				mm_modem_get_device_identifier(mm_modem),
 				mm_modem_get_path(mm_modem));
 			sim_pvt_t *sim = find_sim(mm_sim_get_identifier(mm_sim));
 			if(!sim) {
 				goto unref_mm;
 			}
-			ast_log(LOG_NOTICE, "Resolved sim %s at %s",
+			ast_verb(1, "Resolved sim %s at %s",
 				mm_sim_get_identifier(mm_sim),
 				mm_sim_get_path(mm_sim));
 			sim->device = mm_sim;
@@ -769,7 +763,7 @@ static int load_config(int reload)
 			if(ast_strlen_zero(sim->exten)) {
 				ast_string_field_set(sim, exten, (gchar**)mm_modem_get_own_numbers(mm_modem)[0]);
 			}
-			ast_log(LOG_NOTICE, "Resolved sim %s exten %s",
+			ast_verb(1, "Resolved sim %s exten %s",
 				mm_sim_get_identifier(mm_sim),
 				sim->exten);
 			g_signal_connect(mm_modem, "state-changed", G_CALLBACK(on_modem_state_changed), sim);
@@ -831,7 +825,7 @@ static void *stream_monitor(void *data)
 		modemmanager_pvt_unlock(sim->modem);
 
 		if (!sim->modem->owner || sim->modem->abort) {
-			ast_log(LOG_NOTICE, "aborting...\n");
+			ast_verb(1, "aborting...\n");
 			sim->modem->abort = 0;
 			return NULL;
 		}
@@ -918,12 +912,12 @@ static int start_stream(sim_pvt_t *sim)
 	 * stream is started, if this is the case sim->modem->owner will be NULL
 	 * and start_stream should be aborted. */
 	if (sim->modem->streamstate || !sim->modem->owner) {
-		ast_log(LOG_NOTICE, "Unable to start stream.\n");
+		ast_verb(1, "Unable to start stream.\n");
 		goto return_unlock;
 	}
 
 	sim->modem->streamstate = 1;
-	ast_log(LOG_NOTICE, "Starting stream\n");
+	ast_verb(1, "Starting stream\n");
 
 	res = open_stream(sim);
 	if (res != paNoError) {
@@ -955,7 +949,7 @@ return_unlock:
 static int stop_stream(sim_pvt_t *sim)
 {
 	if (!sim->modem->streamstate || sim->modem->thread == AST_PTHREADT_NULL) {
-		ast_log(LOG_NOTICE, "Not in streaming or thread is dead (stream=%s, thread=%d). exit.\n", AST_YESNO(sim->modem->streamstate), sim->modem->thread);
+		ast_verb(1, "Not in streaming or thread is dead (stream=%s, thread=%d). exit.\n", AST_YESNO(sim->modem->streamstate), sim->modem->thread);
 		return 0;
 	}
 
@@ -971,7 +965,7 @@ static int stop_stream(sim_pvt_t *sim)
 	sim->modem->streamstate = 0;
 	modemmanager_pvt_unlock(sim->modem);
 
-	ast_log(LOG_NOTICE, "Unlocked stream.\n");
+	ast_verb(1, "Unlocked stream.\n");
 
 	return 0;
 }
@@ -1068,11 +1062,11 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 	struct ast_channel *chan = NULL;
 	sim_pvt_t *sim;
 
-	ast_log(LOG_NOTICE, "requested type %s, data %s\n", type, data);
+	ast_verb(1, "requested type %s, data %s\n", type, data);
 
 	const char *number = strchr(data, '/');
 	if(!number) {
-		ast_log(LOG_NOTICE, "Invalid request %s - missing identifier\n", data);
+		ast_verb(1, "Invalid request %s - missing identifier\n", data);
 		return NULL;
 	}
 	number++;
@@ -1085,28 +1079,28 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 	ast_copy_string(identifier, data, number - data);
 
 	if (!(sim = find_sim(identifier))) {
-		ast_log(LOG_NOTICE, "Sim '%s' not found\n", identifier);
+		ast_verb(1, "Sim '%s' not found\n", identifier);
 		return NULL;
 	}
 
-	ast_log(LOG_NOTICE, "Sim '%s' resolved. (Modem: %s)\n", identifier, sim->modem->identifier);
+	ast_verb(1, "Sim '%s' resolved. (Modem: %s)\n", identifier, sim->modem->identifier);
 
 	if (!(ast_format_cap_iscompatible(cap, modemmanager_tech.capabilities))) {
 		struct ast_str *cap_buf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
-		ast_log(LOG_NOTICE, "Channel requested with unsupported format(s): '%s'\n",
+		ast_verb(1, "Channel requested with unsupported format(s): '%s'\n",
 			ast_format_cap_get_names(cap, &cap_buf));
 		goto return_unref;
 	}
 
 	if (sim->modem->owner) {
-		ast_log(LOG_NOTICE, "Line is busy\n");
+		ast_verb(1, "Line is busy\n");
 		*cause = AST_CAUSE_BUSY;
 		goto return_unref;
 	}
 
 	MMModemState device_state = mm_modem_get_state(sim->modem->device);
 	if(device_state < MM_MODEM_STATE_REGISTERED) {
-		ast_log(LOG_NOTICE, "Line is unavailable state (MMModemState %d)\n", device_state);
+		ast_verb(1, "Line is unavailable state (MMModemState %d)\n", device_state);
 		*cause = AST_CAUSE_FACILITY_NOT_SUBSCRIBED;
 		goto return_unref;
 	}
@@ -1121,7 +1115,7 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 		g_clear_error(&error);
 		goto return_unref;
 	}
-	ast_log(LOG_NOTICE, "Call %s created.\n", mm_call_get_path(sim->modem->call));
+	ast_verb(1, "Call %s created.\n", mm_call_get_path(sim->modem->call));
 
 	modemmanager_pvt_lock(sim->modem);
 	chan = modemmanager_new(sim, NULL, NULL, NULL, AST_STATE_DOWN, assignedids, requestor);
@@ -1140,7 +1134,7 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 		g_clear_error(&error);
 		goto return_unref;
 	}
-	ast_log(LOG_NOTICE, "Call %s started (port: %s)\n", mm_call_get_path(sim->modem->call), mm_call_get_audio_port(sim->modem->call));
+	ast_verb(1, "Call %s started (port: %s)\n", mm_call_get_path(sim->modem->call), mm_call_get_audio_port(sim->modem->call));
 return_unref:
 	unref_sim(sim);
 	return chan;
@@ -1176,12 +1170,12 @@ static int modemmanager_hangup(struct ast_channel *c)
 	GError *error = NULL;
 	sim_pvt_t *sim = ast_channel_tech_pvt(c);
 
-	ast_log(LOG_NOTICE, "Hanging up %s", sim->identifier);
+	ast_verb(1, "Hanging up %s", sim->identifier);
 
 	sim->modem->hookstate = 0;
 	sim->modem->owner = NULL;
 	stop_stream(sim);
-	ast_log(LOG_NOTICE, "Stop stream succeded %s", sim->identifier);
+	ast_verb(1, "Stop stream succeded %s", sim->identifier);
 
 	if(mm_call_get_state(sim->modem->call) != MM_CALL_STATE_TERMINATED) {
 		mm_call_hangup_sync(sim->modem->call, NULL, &error);
@@ -1220,7 +1214,7 @@ static int modemmanager_answer(struct ast_channel *c)
 
 static struct ast_frame *modemmanager_read(struct ast_channel *chan)
 {
-	ast_debug(1, "I should not be called ...\n");
+	ast_verb(1, "I should not be called ...\n");
 
 	return &ast_null_frame;
 }
@@ -1247,7 +1241,7 @@ static int modemmanager_write(struct ast_channel *chan, struct ast_frame *f)
 }
 
 static int modemmanager_indicate(struct ast_channel *chan, int cond, const void *data, size_t datalen) {
-	ast_debug(1, "Requested indication %d on channel %s\n", cond, ast_channel_name(chan));
+	ast_verb(1, "Requested indication %d on channel %s\n", cond, ast_channel_name(chan));
 	return 0;
 }
 
@@ -1387,11 +1381,11 @@ static int unload_module(void)
 }
 
 static void create_mainloop() {
-	ast_log(LOG_NOTICE, "GMainLoop started\n");
+	ast_verb(1, "GMainLoop started\n");
 	loop = g_main_loop_new(NULL, FALSE);
 	g_main_loop_run(loop);
 	g_main_loop_unref(loop);
-	ast_log(LOG_NOTICE, "GMainLoop stopped\n");
+	ast_verb(1, "GMainLoop stopped\n");
 }
 
 /*!
