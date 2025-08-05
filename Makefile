@@ -1,5 +1,6 @@
 PROJM =  chan_modemmanager.so
 chan_modemmanagerm_so_OBJS =  chan_modemmanager.o
+res_mmsd_so_OBJS = res_mmsd.o
 SOURCES = chan_modemmanager.c
 HEADERS = 
 
@@ -18,13 +19,16 @@ LIBS    =
 srcdir = @srcdir@
 VPATH = @srcdir@
 
-all: chan_modemmanager.so
+all: chan_modemmanager.so res_mmsd.so
 
 clean:
-	$(RM) chan_modemmanager.o chan_modemmanager.so
+	$(RM) chan_modemmanager.o chan_modemmanager.so res_mmsd.o res_mmsd.so
 
-$(PROJM): $(chan_modemmanagerm_so_OBJS) Makefile
+chan_modemmanager.so: $(chan_modemmanagerm_so_OBJS) Makefile
 	$(LD) $(LDFLAGS) $(SOLINK) -o $@ $(chan_modemmanagerm_so_OBJS) $(LIBS)
+
+res_mmsd.so: $(res_mmsd_so_OBJS) Makefile
+	$(LD) $(LDFLAGS) $(SOLINK) -o $@ $(res_mmsd_so_OBJS) $(LIBS)
 
 ifneq ($(wildcard .*.d),)
    include .*.d
