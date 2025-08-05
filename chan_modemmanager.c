@@ -657,7 +657,7 @@ static void on_message_added(MMModemMessaging *messaging, const char *path, gboo
 			res |= ast_msg_set_tech(msg, "%s", "ModemManager");
 			res |= ast_msg_set_endpoint(msg, "%s", sim->identifier);
 			if(res) {
-				ast_log(LOG_WARNING, "Failed to set ast_msg variables2\n");
+				ast_log(LOG_WARNING, "Failed to set ast_msg variables\n");
 				ast_msg_destroy(msg);
 				return;
 			}
@@ -852,13 +852,13 @@ static int open_stream(sim_pvt_t *sim)
 		PaStreamParameters input_params = {
 			.channelCount = 1,
 			.sampleFormat = paInt16,
-			.suggestedLatency = (1.0 / 100.0), /* 20 ms */
+			.suggestedLatency = (1.0 / 100.0),
 			.device = paNoDevice,
 		};
 		PaStreamParameters output_params = {
 			.channelCount = 1,
 			.sampleFormat = paInt16,
-			.suggestedLatency = (1.0 / 100.0), /* 20 ms */
+			.suggestedLatency = (1.0 / 100.0),
 			.device = paNoDevice,
 		};
 		PaDeviceIndex idx, num_devices, def_input, def_output;
@@ -1242,7 +1242,39 @@ static int modemmanager_write(struct ast_channel *chan, struct ast_frame *f)
 
 static int modemmanager_indicate(struct ast_channel *chan, int cond, const void *data, size_t datalen) {
 	ast_verb(1, "Requested indication %d on channel %s\n", cond, ast_channel_name(chan));
-	return 0;
+	sim_pvt_t *sim = ast_channel_tech_pvt(chan);
+	int res = 0;
+
+	switch (cond) {
+	case AST_CONTROL_BUSY:
+	case AST_CONTROL_CONGESTION:
+	case AST_CONTROL_RINGING:
+	case AST_CONTROL_INCOMPLETE:
+	case AST_CONTROL_PVT_CAUSE_CODE:
+	case -1:
+		res = -1;  /* Ask for inband indications */
+		break;
+	case AST_CONTROL_PROGRESS:
+	case AST_CONTROL_PROCEEDING:
+	case AST_CONTROL_VIDUPDATE:
+	case AST_CONTROL_SRCUPDATE:
+	case AST_CONTROL_SRCCHANGE:
+		break;
+	case AST_CONTROL_HOLD:
+		ast_verb(1, V_BEGIN "Console Has Been Placed on Hold" V_END);
+		ast_moh_start(chan, data, sim->mohinterpret);
+		break;
+	case AST_CONTROL_UNHOLD:
+		ast_verb(1, V_BEGIN "Console Has Been Retrieved from Hold" V_END);
+		ast_moh_stop(chan);
+		break;
+	default:
+		ast_log(LOG_WARNING, "Don't know how to display condition %d on %s\n",
+			cond, ast_channel_name(chan));
+		/* The core will play inband indications for us if appropriate */
+		res = -1;
+	}
+	return res;
 }
 
 static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
@@ -1334,10 +1366,16 @@ static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli
 		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
 		if (!dev)
 			continue;
-		ast_cli(a->fd, "Device '%s' - %s%s\n",
+		ast_cli(a->fd, "Device '%s' -  %s%s\n"
+			"\tSampleRate: %f\n"
+			"\tInputLatency: %f\n"
+			"\tOutputLatency: %f\n",
 			dev->name,
 			dev->maxInputChannels ? idx == def_input ? "I" : "i" : "",
-			dev->maxOutputChannels ? idx == def_output ? "O" : "o" : ""
+			dev->maxOutputChannels ? idx == def_output ? "O" : "o" : "",
+			dev->defaultSampleRate,
+			dev->defaultLowInputLatency,
+			dev->defaultLowOutputLatency
 		);
 	}
 

@@ -45,6 +45,7 @@
 ; identifier = <org.freedesktop.ModemManager1.Sim.SimIdentifier>
 ; autoanswer = no
 ; context = default
+; message_context = default
 ; extension = s
 ; language = en
 ; overridecontext = no
