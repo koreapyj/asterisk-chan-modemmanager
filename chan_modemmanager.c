@@ -76,13 +76,6 @@
 
 /*!
  * \brief The number of samples to configure the portaudio stream for
- *
- * 320 samples (20 ms) is the most common frame size in Asterisk.  So, the code
- * in this module reads 320 sample frames from the portaudio stream and queues
- * them up on the Asterisk channel.  Frames of any size can be written to a
- * portaudio stream, but the portaudio documentation does say that for high
- * performance applications, the data should be written to Pa_WriteStream in
- * the same size as what is used to initialize the stream.
  */
 #define NUM_SAMPLES      160
 
@@ -129,17 +122,16 @@ typedef struct modem_pvt {
 	/*! Current channel for this device */
 	struct ast_channel *owner;
 	/*! Current PortAudio stream for this device */
-	PaStream *stream;
-	/*! A frame for preparing to queue on to the channel */
-	struct ast_frame fr;
+	PaStream *input_stream;
+	PaStream *output_stream;
 	/*! Running = 1, Not running = 0 */
 	unsigned int streamstate:1;
-	/*! Abort stream processing? */
-	unsigned int abort:1;
 	/*! On-hook = 0, Off-hook = 1 */
 	unsigned int hookstate:1;
 	/*! Unmuted = 0, Muted = 1 */
 	unsigned int muted:1;
+	/*! Input buffer */
+	char inbuf[NUM_SAMPLES*sizeof(int16_t) + AST_FRIENDLY_OFFSET];
 	/*! Modem device */
 	MMModem *device;
 	/*! Modem voice */
@@ -795,84 +787,64 @@ static int pvt_cmp_cb(void *obj, void *arg, int flags)
 	return !strcasecmp(pvt->identifier, pvt2->identifier) ? CMP_MATCH | CMP_STOP : 0;
 }
 
-/*!
- * \brief Stream monitor thread
- *
- * \arg data A pointer to the console_pvt structure that contains the portaudio
- *      stream that needs to be monitored.
- *
- * This function runs in its own thread to monitor data coming in from a
- * portaudio stream.  When enough data is available, it is queued up to
- * be read from the Asterisk channel.
- */
-static void *stream_monitor(void *data)
+static int stream_cb( const void *input,
+	void *output,
+	unsigned long frameCount,
+	const PaStreamCallbackTimeInfo* timeInfo,
+	PaStreamCallbackFlags statusFlags,
+	void *userData )
 {
-	sim_pvt_t *sim = data;
-	char buf[NUM_SAMPLES * sizeof(int16_t)];
-	PaError res;
+	sim_pvt_t *sim = (sim_pvt_t *)userData;
+	if (!sim->modem->owner) {
+		ast_verb(1, "aborting...\n");
+		return paAbort;
+	}
+
+	if(frameCount > NUM_SAMPLES) {
+		ast_log(LOG_WARNING, "Frame count is larger than configured samples\n");
+		return paContinue;
+	}
+
+	if(input == NULL) {
+		ast_log(LOG_WARNING, "Input buffer is NULL\n");
+		return paContinue;
+	}
+
+	memcpy(&sim->modem->inbuf[AST_FRIENDLY_OFFSET], input, frameCount * sizeof(int16_t));
 	struct ast_frame f = {
 		.frametype = AST_FRAME_VOICE,
 		.subclass.format = ast_format_slin,
-		.src = "modemmanager_stream_monitor",
-		.data.ptr = buf,
-		.datalen = sizeof(buf),
-		.samples = sizeof(buf) / sizeof(int16_t),
+		.src = "modemmanager_stream_cb",
+		.data.ptr = &sim->modem->inbuf[AST_FRIENDLY_OFFSET],
+		.offset = AST_FRIENDLY_OFFSET,
+		.datalen = (int)frameCount * sizeof(int16_t),
+		.samples = (int)frameCount,
 	};
-
-	for (;;) {
-		modemmanager_pvt_lock(sim->modem);
-		res = Pa_ReadStream(sim->modem->stream, buf, sizeof(buf) / sizeof(int16_t));
-		modemmanager_pvt_unlock(sim->modem);
-
-		if (!sim->modem->owner || sim->modem->abort) {
-			ast_verb(1, "aborting...\n");
-			sim->modem->abort = 0;
-			return NULL;
-		}
-
-		if (res == paNoError) {
-			ast_queue_frame(sim->modem->owner, &f);
-		} else {
-			ast_log(LOG_WARNING, "Console ReadStream failed: %s\n", Pa_GetErrorText(res));
-		}
-	}
-
-	return NULL;
+	ast_queue_frame(sim->modem->owner, &f);
+	return paContinue;
 }
 
 static int open_stream(sim_pvt_t *sim)
 {
-	int res = paInternalError;
+	PaError res = paInternalError;
+	PaDeviceIndex idx, num_devices;
 
-	if (!strcasecmp(sim->modem->input_device, "default") &&
-		!strcasecmp(sim->modem->output_device, "default")) {
-		res = Pa_OpenDefaultStream(&sim->modem->stream, INPUT_CHANNELS, OUTPUT_CHANNELS,
-			paInt16, SAMPLE_RATE, NUM_SAMPLES, NULL, NULL);
+	if (!(num_devices = Pa_GetDeviceCount()))
+		return res;
+
+	if (!strcasecmp(sim->modem->input_device, "default")) {
+		res = Pa_OpenDefaultStream(&sim->modem->input_stream, INPUT_CHANNELS, 0,
+			paInt16, SAMPLE_RATE, NUM_SAMPLES, stream_cb, sim);
 	} else {
+		PaDeviceIndex def_input = Pa_GetDefaultInputDevice();
 		PaStreamParameters input_params = {
 			.channelCount = 1,
 			.sampleFormat = paInt16,
 			.suggestedLatency = (1.0 / 100.0),
 			.device = paNoDevice,
 		};
-		PaStreamParameters output_params = {
-			.channelCount = 1,
-			.sampleFormat = paInt16,
-			.suggestedLatency = (1.0 / 100.0),
-			.device = paNoDevice,
-		};
-		PaDeviceIndex idx, num_devices, def_input, def_output;
 
-		if (!(num_devices = Pa_GetDeviceCount()))
-			return res;
-
-		def_input = Pa_GetDefaultInputDevice();
-		def_output = Pa_GetDefaultOutputDevice();
-
-		for (idx = 0;
-			idx < num_devices && (input_params.device == paNoDevice
-				|| output_params.device == paNoDevice);
-			idx++)
+		for (idx = 0; idx < num_devices && input_params.device == paNoDevice; idx++)
 		{
 			const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
 
@@ -881,6 +853,29 @@ static int open_stream(sim_pvt_t *sim)
 					!strcasecmp(sim->modem->input_device, dev->name) )
 					input_params.device = idx;
 			}
+		}
+		if (input_params.device == paNoDevice)
+			ast_log(LOG_ERROR, "No input device found for modem '%s'\n", sim->modem->identifier);
+
+		res = Pa_OpenStream(&sim->modem->input_stream, &input_params, NULL,
+			SAMPLE_RATE, NUM_SAMPLES, paNoFlag, stream_cb, sim);
+	}
+
+	if (!strcasecmp(sim->modem->output_device, "default")) {
+		res = Pa_OpenDefaultStream(&sim->modem->output_stream, 0, OUTPUT_CHANNELS,
+			paInt16, SAMPLE_RATE, NUM_SAMPLES, NULL, NULL);
+	} else {
+		PaDeviceIndex def_output = Pa_GetDefaultOutputDevice();
+		PaStreamParameters output_params = {
+			.channelCount = 1,
+			.sampleFormat = paInt16,
+			.suggestedLatency = (1.0 / 100.0),
+			.device = paNoDevice,
+		};
+
+		for (idx = 0; idx < num_devices && output_params.device == paNoDevice; idx++)
+		{
+			const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
 
 			if (dev->maxOutputChannels) {
 				if ( (idx == def_output && !strcasecmp(sim->modem->output_device, "default")) ||
@@ -888,14 +883,19 @@ static int open_stream(sim_pvt_t *sim)
 					output_params.device = idx;
 			}
 		}
-
-		if (input_params.device == paNoDevice)
-			ast_log(LOG_ERROR, "No input device found for modem '%s'\n", sim->modem->identifier);
 		if (output_params.device == paNoDevice)
 			ast_log(LOG_ERROR, "No output device found for modem '%s'\n", sim->modem->identifier);
 
-		res = Pa_OpenStream(&sim->modem->stream, &input_params, &output_params,
+		res = Pa_OpenStream(&sim->modem->output_stream, NULL, &output_params,
 			SAMPLE_RATE, NUM_SAMPLES, paNoFlag, NULL, NULL);
+	}
+
+	if(sim->modem->input_stream == NULL) {
+		ast_log(LOG_ERROR, "No input stream '%s'\n", sim->modem->identifier);
+	}
+
+	if(sim->modem->output_stream == NULL) {
+		ast_log(LOG_ERROR, "No output stream '%s'\n", sim->modem->identifier);
 	}
 
 	return res;
@@ -927,18 +927,23 @@ static int start_stream(sim_pvt_t *sim)
 		goto return_unlock;
 	}
 
-	res = Pa_StartStream(sim->modem->stream);
+	res = Pa_StartStream(sim->modem->input_stream);
 	if (res != paNoError) {
-		ast_log(LOG_WARNING, "Failed to start stream - (%d) %s\n",
+		ast_log(LOG_WARNING, "Failed to start input stream - (%d) %s\n",
 			res, Pa_GetErrorText(res));
 		ret_val = -1;
 		goto return_unlock;
 	}
 
-	if (ast_pthread_create_background(&sim->modem->thread, NULL, stream_monitor, sim)) {
-		ast_log(LOG_ERROR, "Failed to start stream monitor thread\n");
+	res = Pa_StartStream(sim->modem->output_stream);
+	if (res != paNoError) {
+		ast_log(LOG_WARNING, "Failed to start output stream - (%d) %s\n",
+			res, Pa_GetErrorText(res));
 		ret_val = -1;
+		goto return_unlock;
 	}
+
+	ast_verb(1, "Stream started\n");
 
 return_unlock:
 	modemmanager_pvt_unlock(sim->modem);
@@ -948,20 +953,18 @@ return_unlock:
 
 static int stop_stream(sim_pvt_t *sim)
 {
-	if (!sim->modem->streamstate || sim->modem->thread == AST_PTHREADT_NULL) {
-		ast_verb(1, "Not in streaming or thread is dead (stream=%s, thread=%d). exit.\n", AST_YESNO(sim->modem->streamstate), sim->modem->thread);
+	if (!sim->modem->streamstate) {
+		ast_verb(1, "Not in streaming (stream=%s). exit.\n", AST_YESNO(sim->modem->streamstate));
 		return 0;
 	}
 
-	sim->modem->abort = 1;
-	/* Wait for sim->modem->thread to exit cleanly, to avoid killing it while it's holding a lock. */
-	pthread_kill(sim->modem->thread, SIGURG); /* Wake it up if needed, but don't cancel it */
-	pthread_join(sim->modem->thread, NULL);
-
 	modemmanager_pvt_lock(sim->modem);
-	Pa_AbortStream(sim->modem->stream);
-	Pa_CloseStream(sim->modem->stream);
-	sim->modem->stream = NULL;
+	Pa_AbortStream(sim->modem->input_stream);
+	Pa_AbortStream(sim->modem->output_stream);
+	Pa_CloseStream(sim->modem->input_stream);
+	Pa_CloseStream(sim->modem->output_stream);
+	sim->modem->input_stream = NULL;
+	sim->modem->output_stream = NULL;
 	sim->modem->streamstate = 0;
 	modemmanager_pvt_unlock(sim->modem);
 
@@ -1224,18 +1227,28 @@ static int modemmanager_call(struct ast_channel *c, const char *dest, int timeou
 	return 0;
 }
 
-static int modemmanager_write(struct ast_channel *chan, struct ast_frame *f)
+static int modemmanager_write(struct ast_channel *chan, struct ast_frame *frame)
 {
-	if (f->frametype != AST_FRAME_VOICE
-		|| ast_format_cmp(f->subclass.format, ast_format_slin) != AST_FORMAT_CMP_EQUAL) {
-		return 0;
-	}
-
+	PaError paret;
 	sim_pvt_t *sim = ast_channel_tech_pvt(chan);
 
-	modemmanager_pvt_lock(sim->modem);
-	Pa_WriteStream(sim->modem->stream, f->data.ptr, f->samples);
-	modemmanager_pvt_unlock(sim->modem);
+	switch(frame->frametype) {
+		case AST_FRAME_VOICE:
+			if(sim->modem->output_stream == NULL
+				|| !Pa_IsStreamActive(sim->modem->output_stream))
+			{
+				break;
+			}
+			modemmanager_pvt_lock(sim->modem);
+			paret = Pa_WriteStream(sim->modem->output_stream, frame->data.ptr, frame->samples);
+			modemmanager_pvt_unlock(sim->modem);
+			if(paret != paNoError) {
+				ast_log(LOG_WARNING, "Pa_WriteStream failed: %s\n", Pa_GetErrorText(paret));
+			}
+			break;
+		default:
+			ast_log(LOG_WARNING, "Can't send %u type frames with ModemManager\n", frame->frametype);
+	}
 
 	return 0;
 }
