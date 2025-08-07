@@ -67,17 +67,9 @@
 #include "asterisk/format_cache.h"
 
 /*!
- * \brief The sample rate to request from PortAudio
- *
- * \todo Make this optional.  If this is only going to talk to 8 kHz endpoints,
- *       then it makes sense to use 8 kHz natively.
- */
-#define SAMPLE_RATE      8000
-
-/*!
  * \brief The number of samples to configure the portaudio stream for
  */
-#define NUM_SAMPLES      160
+#define NUM_SAMPLES      320
 
 /*! \brief Mono Input */
 #define INPUT_CHANNELS   1
@@ -124,6 +116,7 @@ typedef struct modem_pvt {
 	/*! Current PortAudio stream for this device */
 	PaStream *input_stream;
 	PaStream *output_stream;
+	struct ast_format *format;
 	/*! Running = 1, Not running = 0 */
 	unsigned int streamstate:1;
 	/*! On-hook = 0, Off-hook = 1 */
@@ -377,6 +370,7 @@ static void build_modem(struct ast_config *cfg, const char *name)
 	else
 		modemmanager_pvt_unlock(pvt);
 
+	pvt->format = ast_format_none;
 	unref_modem(pvt);
 }
 
@@ -632,7 +626,7 @@ static void on_message_added(MMModemMessaging *messaging, const char *path, gboo
 			/* Possibly MMS but currently we don't implement mms support */
 		}
 		else {
-			ast_verb(1, "Text %s\n", mm_sms_get_text(message), sim->exten, sim->identifier);
+			ast_verb(1, "Text %s\n", mm_sms_get_text(message));
 			/* PJSIP method */
 			struct ast_msg *msg = ast_msg_alloc();
 			ast_verb(1, "Created ast_msg\n");
@@ -753,7 +747,7 @@ static int load_config(int reload)
 			sim->device = mm_sim;
 			sim->modem = modem;
 			if(ast_strlen_zero(sim->exten)) {
-				ast_string_field_set(sim, exten, (gchar**)mm_modem_get_own_numbers(mm_modem)[0]);
+				ast_string_field_set(sim, exten, ((const gchar**)mm_modem_get_own_numbers(mm_modem))[0]);
 			}
 			ast_verb(1, "Resolved sim %s exten %s",
 				mm_sim_get_identifier(mm_sim),
@@ -813,7 +807,7 @@ static int stream_cb( const void *input,
 	memcpy(&sim->modem->inbuf[AST_FRIENDLY_OFFSET], input, frameCount * sizeof(int16_t));
 	struct ast_frame f = {
 		.frametype = AST_FRAME_VOICE,
-		.subclass.format = ast_format_slin,
+		.subclass.format = sim->modem->format,
 		.src = "modemmanager_stream_cb",
 		.data.ptr = &sim->modem->inbuf[AST_FRIENDLY_OFFSET],
 		.offset = AST_FRIENDLY_OFFSET,
@@ -824,78 +818,86 @@ static int stream_cb( const void *input,
 	return paContinue;
 }
 
+static PaDeviceIndex pa_pick_input_device_by_name(const ast_string_field name) {
+	PaDeviceIndex idx, num_devices;
+	PaDeviceIndex def = Pa_GetDefaultInputDevice();
+
+	for (idx = 0; idx < num_devices; idx++)
+	{
+		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
+
+		if (dev->maxInputChannels) {
+			if ( (idx == def && !strcasecmp(name, "default")) ||
+				!strcasecmp(name, dev->name) )
+				return idx;
+		}
+	}
+
+	ast_log(LOG_ERROR, "No such input device '%s'\n", name);
+	return paNoDevice;
+}
+
+static PaDeviceIndex pa_pick_output_device_by_name(const ast_string_field name) {
+	PaDeviceIndex idx, num_devices;
+	PaDeviceIndex def = Pa_GetDefaultOutputDevice();
+
+	for (idx = 0; idx < num_devices; idx++)
+	{
+		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
+
+		if (dev->maxOutputChannels) {
+			if ( (idx == def && !strcasecmp(name, "default")) ||
+				!strcasecmp(name, dev->name) )
+				return idx;
+		}
+	}
+
+	ast_log(LOG_ERROR, "No such output device '%s'\n", name);
+	return paNoDevice;
+}
+
 static int open_stream(sim_pvt_t *sim)
 {
 	PaError res = paInternalError;
 	PaDeviceIndex idx, num_devices;
 
-	if (!(num_devices = Pa_GetDeviceCount()))
-		return res;
+	PaStreamParameters input_params = {
+		.channelCount = 1,
+		.sampleFormat = paInt16,
+		.suggestedLatency = (1.0 / 100.0),
+		.device = pa_pick_input_device_by_name(sim->modem->input_device),
+	};
+	PaStreamParameters output_params = {
+		.channelCount = 1,
+		.sampleFormat = paInt16,
+		.suggestedLatency = (1.0 / 100.0),
+		.device = pa_pick_output_device_by_name(sim->modem->output_device),
+	};
 
-	if (!strcasecmp(sim->modem->input_device, "default")) {
-		res = Pa_OpenDefaultStream(&sim->modem->input_stream, INPUT_CHANNELS, 0,
-			paInt16, SAMPLE_RATE, NUM_SAMPLES, stream_cb, sim);
-	} else {
-		PaDeviceIndex def_input = Pa_GetDefaultInputDevice();
-		PaStreamParameters input_params = {
-			.channelCount = 1,
-			.sampleFormat = paInt16,
-			.suggestedLatency = (1.0 / 100.0),
-			.device = paNoDevice,
-		};
-
-		for (idx = 0; idx < num_devices && input_params.device == paNoDevice; idx++)
-		{
-			const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
-
-			if (dev->maxInputChannels) {
-				if ( (idx == def_input && !strcasecmp(sim->modem->input_device, "default")) ||
-					!strcasecmp(sim->modem->input_device, dev->name) )
-					input_params.device = idx;
-			}
-		}
-		if (input_params.device == paNoDevice)
-			ast_log(LOG_ERROR, "No input device found for modem '%s'\n", sim->modem->identifier);
-
-		res = Pa_OpenStream(&sim->modem->input_stream, &input_params, NULL,
-			SAMPLE_RATE, NUM_SAMPLES, paNoFlag, stream_cb, sim);
+	if (input_params.device == paNoDevice || output_params.device == paNoDevice) {
+		return paInternalError;
 	}
 
-	if (!strcasecmp(sim->modem->output_device, "default")) {
-		res = Pa_OpenDefaultStream(&sim->modem->output_stream, 0, OUTPUT_CHANNELS,
-			paInt16, SAMPLE_RATE, NUM_SAMPLES, NULL, NULL);
-	} else {
-		PaDeviceIndex def_output = Pa_GetDefaultOutputDevice();
-		PaStreamParameters output_params = {
-			.channelCount = 1,
-			.sampleFormat = paInt16,
-			.suggestedLatency = (1.0 / 100.0),
-			.device = paNoDevice,
-		};
-
-		for (idx = 0; idx < num_devices && output_params.device == paNoDevice; idx++)
-		{
-			const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
-
-			if (dev->maxOutputChannels) {
-				if ( (idx == def_output && !strcasecmp(sim->modem->output_device, "default")) ||
-					!strcasecmp(sim->modem->output_device, dev->name) )
-					output_params.device = idx;
-			}
-		}
-		if (output_params.device == paNoDevice)
-			ast_log(LOG_ERROR, "No output device found for modem '%s'\n", sim->modem->identifier);
-
-		res = Pa_OpenStream(&sim->modem->output_stream, NULL, &output_params,
-			SAMPLE_RATE, NUM_SAMPLES, paNoFlag, NULL, NULL);
+	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(input_params.device),
+		*output_devinfo = Pa_GetDeviceInfo(output_params.device);
+	if (input_devinfo->defaultSampleRate != output_devinfo->defaultSampleRate) {
+		ast_log(LOG_WARNING, "Default sample rate for input and output does not match. Stream may not work correctly.\n");
 	}
+
+	res = Pa_OpenStream(&sim->modem->input_stream, &input_params, NULL,
+		input_devinfo->defaultSampleRate, NUM_SAMPLES, paNoFlag, stream_cb, sim);
+	ast_verb(1, "Input defaultSampleRate=%.0f", input_devinfo->defaultSampleRate);
+
+	res = Pa_OpenStream(&sim->modem->output_stream, NULL, &output_params,
+		output_devinfo->defaultSampleRate, NUM_SAMPLES, paNoFlag, NULL, NULL);
+	ast_verb(1, "Output defaultSampleRate=%.0f", output_devinfo->defaultSampleRate);
 
 	if(sim->modem->input_stream == NULL) {
-		ast_log(LOG_ERROR, "No input stream '%s'\n", sim->modem->identifier);
+		ast_log(LOG_ERROR, "No input stream for modem '%s'\n", sim->modem->identifier);
 	}
 
 	if(sim->modem->output_stream == NULL) {
-		ast_log(LOG_ERROR, "No output stream '%s'\n", sim->modem->identifier);
+		ast_log(LOG_ERROR, "No output stream for modem '%s'\n", sim->modem->identifier);
 	}
 
 	return res;
@@ -986,6 +988,17 @@ static struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, con
 		return NULL;
 	}
 
+	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(pa_pick_input_device_by_name(sim->modem->input_device));
+	if(input_devinfo->defaultSampleRate == (double)16000) {
+		sim->modem->format = ast_format_slin16;
+		ast_verb(1, "pick ast_format_slin16");
+	}
+	else if(input_devinfo->defaultSampleRate == (double)8000) {
+		sim->modem->format = ast_format_slin;
+		ast_verb(1, "pick ast_format_slin");
+	}
+	ast_format_cap_append(caps, sim->modem->format, 0);
+
 	if (!(chan = ast_channel_alloc(1, state, cid, NULL, NULL,
 		ext, ctx, assignedids, requestor, 0, "ModemManager/%s", mm_sim_get_identifier(sim->device)))) {
 		ao2_ref(caps, -1);
@@ -993,13 +1006,24 @@ static struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, con
 	}
 
 	ast_channel_stage_snapshot(chan);
-
 	ast_channel_tech_set(chan, &modemmanager_tech);
-	ast_channel_set_readformat(chan, ast_format_slin);
-	ast_channel_set_writeformat(chan, ast_format_slin);
-	ast_format_cap_append(caps, ast_format_slin, 0);
+
+	if (!ast_format_cap_empty(caps)) {
+		struct ast_format *fmt;
+
+		fmt = ast_format_cap_get_best_by_type(caps, AST_MEDIA_TYPE_AUDIO);
+		if (!fmt) {
+			/* Since our capabilities aren't empty, this will succeed */
+			fmt = ast_format_cap_get_format(caps, 0);
+		}
+		ast_channel_set_writeformat(chan, fmt);
+		ast_channel_set_readformat(chan, fmt);
+		ao2_ref(fmt, -1);
+	}
+
 	ast_channel_nativeformats_set(chan, caps);
 	ao2_ref(caps, -1);
+
 	ast_channel_tech_pvt_set(chan, ref_sim(sim));
 
 	sim->modem->owner = chan;
@@ -1025,7 +1049,7 @@ static struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, con
 
 static void oncalldtmfreceived(MMCall *call, char *dtmf, sim_pvt_t *sim)
 {
-	ast_log(LOG_NOTICE, "DTMF received %s\n", dtmf, sim->identifier);
+	ast_log(LOG_NOTICE, "DTMF received %s from modem %s\n", dtmf, sim->identifier);
 }
 
 static void oncallstatechanged(MMCall *call, MMCallState old, MMCallState new, MMCallStateReason reason, sim_pvt_t *sim)
@@ -1207,7 +1231,7 @@ static int modemmanager_answer(struct ast_channel *c)
 			error->code, error->message);
 		g_clear_error(&error);
 		ast_queue_hangup_with_cause(c, AST_CAUSE_FAILURE);
-		return;
+		return -1;
 	}
 
 	ast_setstate(c, AST_STATE_UP);
@@ -1242,8 +1266,8 @@ static int modemmanager_write(struct ast_channel *chan, struct ast_frame *frame)
 			modemmanager_pvt_lock(sim->modem);
 			paret = Pa_WriteStream(sim->modem->output_stream, frame->data.ptr, frame->samples);
 			modemmanager_pvt_unlock(sim->modem);
-			if(paret != paNoError) {
-				ast_log(LOG_WARNING, "Pa_WriteStream failed: %s\n", Pa_GetErrorText(paret));
+			if(paret != paNoError && paret != paOutputUnderflowed) {
+				ast_log(LOG_WARNING, "Pa_WriteStream failed: %s\n", Pa_GetErrorText(paret), Pa_GetStreamInfo(sim->modem->output_stream)->sampleRate);
 			}
 			break;
 		default:
@@ -1431,7 +1455,7 @@ static int unload_module(void)
 	return 0;
 }
 
-static void create_mainloop() {
+static void *create_mainloop() {
 	ast_verb(1, "GMainLoop started\n");
 	loop = g_main_loop_new(NULL, FALSE);
 	g_main_loop_run(loop);
@@ -1458,6 +1482,7 @@ static int load_module(void)
 	if (!(modemmanager_tech.capabilities = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT))) {
 		return AST_MODULE_LOAD_DECLINE;
 	}
+	ast_format_cap_append(modemmanager_tech.capabilities, ast_format_slin16, 0);
 	ast_format_cap_append(modemmanager_tech.capabilities, ast_format_slin, 0);
 
 	modems = ao2_container_alloc_hash(AO2_ALLOC_OPT_LOCK_MUTEX, 0, NUM_PVT_BUCKETS,
