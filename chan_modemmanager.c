@@ -819,7 +819,7 @@ static int stream_cb( const void *input,
 }
 
 static PaDeviceIndex pa_pick_input_device_by_name(const ast_string_field name) {
-	PaDeviceIndex idx, num_devices;
+	PaDeviceIndex idx, num_devices = Pa_GetDeviceCount();
 	PaDeviceIndex def = Pa_GetDefaultInputDevice();
 
 	for (idx = 0; idx < num_devices; idx++)
@@ -838,7 +838,7 @@ static PaDeviceIndex pa_pick_input_device_by_name(const ast_string_field name) {
 }
 
 static PaDeviceIndex pa_pick_output_device_by_name(const ast_string_field name) {
-	PaDeviceIndex idx, num_devices;
+	PaDeviceIndex idx, num_devices = Pa_GetDeviceCount();
 	PaDeviceIndex def = Pa_GetDefaultOutputDevice();
 
 	for (idx = 0; idx < num_devices; idx++)
@@ -988,7 +988,12 @@ static struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, con
 		return NULL;
 	}
 
-	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(pa_pick_input_device_by_name(sim->modem->input_device));
+	const PaDeviceIndex input_dev_idx = pa_pick_input_device_by_name(sim->modem->input_device);
+	if(input_dev_idx == paNoDevice) {
+		ao2_ref(caps, -1);
+		return NULL;
+	}
+	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(input_dev_idx);
 	if(input_devinfo->defaultSampleRate == (double)16000) {
 		sim->modem->format = ast_format_slin16;
 		ast_verb(1, "pick ast_format_slin16");
