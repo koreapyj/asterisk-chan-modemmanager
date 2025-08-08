@@ -10,32 +10,10 @@
  * at the top of the source tree.
  */
 
-/*! \file
- *
- * \brief XMPP client and component module.
- *
- * \author Yoonji Park <koreapyj@dcmys.kr
- *
- * A reference module for interfacting Asterisk directly as a client or component with
- * an XMPP/Jabber compliant server.
- *
- * This module is based upon the original res_jabber as done by Matt O'Gorman.
- *
- */
-
 /*! \li \ref res_mmsd.c uses the configuration file \ref mmsd.conf
  * \addtogroup configuration_file Configuration Files
  */
 
-/*!
- * \page xmpp.conf xmpp.conf
- * \verbinclude xmpp.conf.sample
- */
-
-/*** MODULEINFO
-	<depend>portaudio</depend>
-	<support_level>extended</support_level>
- ***/
 #define AST_MODULE "res_mmsd"
 
 #include "asterisk.h"
@@ -138,7 +116,6 @@ static void on_message_added(GDBusConnection *conn, const gchar* sender_name, co
 	gchar *msgpath = NULL;
 	GVariant *props;
 	g_variant_get(parameters, "(o@a{sv})", &msgpath, &props);
-	//  Message added: /org/ofono/mms/modemmanager/46d14d64169a0148ef1aa2015b8995bf3f68 (a{sv})
 	ast_verb(1, "Message added: %s (%s)\n", msgpath, g_variant_get_type_string(props));
 	g_free(msgpath);
 
@@ -298,7 +275,6 @@ static int load_module(void)
 		g_clear_error(&error);
 	}
 
-	ast_log(LOG_WARNING, "MMS ok\n");
 	ast_msg_tech_register(&msg_tech);
 
 	ast_cli_register_multiple(cli_mmsd, ARRAY_LEN(cli_mmsd));
