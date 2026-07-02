@@ -24,10 +24,9 @@
  *
  * \ingroup channel_drivers
  *
- * Portaudio http://www.portaudio.com/
- *
- * To install portaudio v19 from svn, check it out using the following command:
- *  - svn co https://www.portaudio.com/repos/portaudio/branches/v19-devel
+ * Call audio flows over the modem's USB audio (UAC) function, accessed
+ * directly through ALSA (plughw so the plug layer handles rate conversion
+ * for cards that are not natively 8/16 kHz).
  */
 
 /*! \li \ref chan_modemmanager.c uses the configuration file \ref modemmanager.conf
@@ -39,7 +38,7 @@
  */
 
 /*** MODULEINFO
-	<depend>portaudio</depend>
+	<depend>alsa</depend>
 	<support_level>extended</support_level>
  ***/
 #define AST_MODULE "chan_modemmanager"
@@ -48,7 +47,7 @@
 
 #include <signal.h>  /* SIGURG */
 
-#include <portaudio.h>
+#include <alsa/asoundlib.h>
 #include <ModemManager/ModemManager.h>
 #include <gio/gio.h>
 #include <glib.h>
@@ -67,9 +66,17 @@
 #include "asterisk/format_cache.h"
 
 /*!
- * \brief The number of samples to configure the portaudio stream for
+ * \brief Samples per 20ms frame at the highest supported rate (16kHz).
+ * Sizes the per-modem input buffer; the actual per-frame count is
+ * rate / 50 (160 at 8kHz, 320 at 16kHz).
  */
 #define NUM_SAMPLES      320
+
+/*! \brief Frame length in milliseconds (one Asterisk voice frame per period) */
+#define FRAME_MS         20
+
+/*! \brief Periods in the ALSA ring buffer (4 x 20ms = 80ms of resilience) */
+#define ALSA_PERIODS     4
 
 /*! \brief Mono Input */
 #define INPUT_CHANNELS   1
@@ -113,12 +120,16 @@ typedef struct modem_pvt {
 	);
 	/*! Current channel for this device */
 	struct ast_channel *owner;
-	/*! Current PortAudio stream for this device */
-	PaStream *input_stream;
-	PaStream *output_stream;
+	/*! ALSA PCM handles for the modem's audio function */
+	snd_pcm_t *capture_pcm;
+	snd_pcm_t *playback_pcm;
+	/*! Sample rate both PCMs were opened at (8000 or 16000) */
+	unsigned int rate;
 	struct ast_format *format;
 	/*! Running = 1, Not running = 0 */
 	unsigned int streamstate:1;
+	/*! Tells the capture thread to exit */
+	unsigned int stream_stop:1;
 	/*! On-hook = 0, Off-hook = 1 */
 	unsigned int hookstate:1;
 	/*! Unmuted = 0, Muted = 1 */
@@ -781,131 +792,236 @@ static int pvt_cmp_cb(void *obj, void *arg, int flags)
 	return !strcasecmp(pvt->identifier, pvt2->identifier) ? CMP_MATCH | CMP_STOP : 0;
 }
 
-static int stream_cb( const void *input,
-	void *output,
-	unsigned long frameCount,
-	const PaStreamCallbackTimeInfo* timeInfo,
-	PaStreamCallbackFlags statusFlags,
-	void *userData )
+/*!
+ * \brief Recover an ALSA PCM from xrun/suspend.
+ * \retval 0 recovered, caller may retry the I/O
+ * \retval -1 unrecoverable
+ */
+static int alsa_pcm_recover(snd_pcm_t *pcm, int err)
 {
-	sim_pvt_t *sim = (sim_pvt_t *)userData;
-	if (!sim->modem->owner) {
-		ast_verb(1, "aborting...\n");
-		return paAbort;
-	}
-
-	if(frameCount > NUM_SAMPLES) {
-		ast_log(LOG_WARNING, "Frame count is larger than configured samples\n");
-		return paContinue;
-	}
-
-	if(input == NULL) {
-		ast_log(LOG_WARNING, "Input buffer is NULL\n");
-		return paContinue;
-	}
-
-	memcpy(&sim->modem->inbuf[AST_FRIENDLY_OFFSET], input, frameCount * sizeof(int16_t));
-	struct ast_frame f = {
-		.frametype = AST_FRAME_VOICE,
-		.subclass.format = sim->modem->format,
-		.src = "modemmanager_stream_cb",
-		.data.ptr = &sim->modem->inbuf[AST_FRIENDLY_OFFSET],
-		.offset = AST_FRIENDLY_OFFSET,
-		.datalen = (int)frameCount * sizeof(int16_t),
-		.samples = (int)frameCount,
-	};
-	ast_queue_frame(sim->modem->owner, &f);
-	return paContinue;
-}
-
-static PaDeviceIndex pa_pick_input_device_by_name(const ast_string_field name) {
-	PaDeviceIndex idx, num_devices = Pa_GetDeviceCount();
-	PaDeviceIndex def = Pa_GetDefaultInputDevice();
-
-	for (idx = 0; idx < num_devices; idx++)
-	{
-		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
-
-		if (dev->maxInputChannels) {
-			if ( (idx == def && !strcasecmp(name, "default")) ||
-				!strcasecmp(name, dev->name) )
-				return idx;
+	switch (err) {
+	case -EPIPE:
+		err = snd_pcm_prepare(pcm);
+		if (err < 0) {
+			ast_log(LOG_WARNING, "Failed to recover from xrun: %s\n", snd_strerror(err));
+			return -1;
 		}
-	}
-
-	ast_log(LOG_ERROR, "No such input device '%s'\n", name);
-	return paNoDevice;
-}
-
-static PaDeviceIndex pa_pick_output_device_by_name(const ast_string_field name) {
-	PaDeviceIndex idx, num_devices = Pa_GetDeviceCount();
-	PaDeviceIndex def = Pa_GetDefaultOutputDevice();
-
-	for (idx = 0; idx < num_devices; idx++)
-	{
-		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
-
-		if (dev->maxOutputChannels) {
-			if ( (idx == def && !strcasecmp(name, "default")) ||
-				!strcasecmp(name, dev->name) )
-				return idx;
+		return 0;
+	case -ESTRPIPE:
+		while ((err = snd_pcm_resume(pcm)) == -EAGAIN) {
+			usleep(10000);
 		}
+		if (err < 0) {
+			err = snd_pcm_prepare(pcm);
+		}
+		if (err < 0) {
+			ast_log(LOG_WARNING, "Failed to recover from suspend: %s\n", snd_strerror(err));
+			return -1;
+		}
+		return 0;
+	default:
+		return -1;
 	}
-
-	ast_log(LOG_ERROR, "No such output device '%s'\n", name);
-	return paNoDevice;
 }
 
+/*!
+ * \brief Recover a capture PCM and restart it.
+ *
+ * snd_pcm_prepare() leaves the stream in PREPARED, but capture streams do
+ * not auto-start from snd_pcm_wait(), so recovery must explicitly restart.
+ */
+static int alsa_capture_recover(snd_pcm_t *pcm, int err)
+{
+	if (alsa_pcm_recover(pcm, err)) {
+		return -1;
+	}
+	if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED && snd_pcm_start(pcm) < 0) {
+		return -1;
+	}
+	return 0;
+}
+
+/*!
+ * \brief Open one PCM at an exact rate: mono S16_LE, 20ms periods.
+ */
+static int alsa_open_pcm(snd_pcm_t **out, const char *device, snd_pcm_stream_t dir, unsigned int rate)
+{
+	snd_pcm_t *pcm = NULL;
+	snd_pcm_hw_params_t *hw;
+	snd_pcm_sw_params_t *sw;
+	snd_pcm_uframes_t period = rate * FRAME_MS / 1000;
+	snd_pcm_uframes_t buffer = period * ALSA_PERIODS;
+	int err;
+
+	err = snd_pcm_open(&pcm, device, dir, 0);
+	if (err < 0) {
+		ast_log(LOG_ERROR, "Failed to open ALSA device '%s' (%s): %s\n",
+			device, dir == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
+			snd_strerror(err));
+		return err;
+	}
+
+	snd_pcm_hw_params_alloca(&hw);
+	snd_pcm_sw_params_alloca(&sw);
+
+	if ((err = snd_pcm_hw_params_any(pcm, hw)) < 0
+		|| (err = snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0
+		|| (err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S16_LE)) < 0
+		|| (err = snd_pcm_hw_params_set_channels(pcm, hw, 1)) < 0
+		|| (err = snd_pcm_hw_params_set_rate(pcm, hw, rate, 0)) < 0
+		|| (err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &period, NULL)) < 0
+		|| (err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buffer)) < 0
+		|| (err = snd_pcm_hw_params(pcm, hw)) < 0) {
+		ast_debug(1, "ALSA device '%s' does not accept %u Hz mono S16_LE: %s\n",
+			device, rate, snd_strerror(err));
+		snd_pcm_close(pcm);
+		return err;
+	}
+
+	if ((err = snd_pcm_sw_params_current(pcm, sw)) < 0
+		|| (err = snd_pcm_sw_params_set_avail_min(pcm, sw, period)) < 0
+		|| (err = snd_pcm_sw_params_set_start_threshold(pcm, sw,
+			dir == SND_PCM_STREAM_PLAYBACK ? period : 1)) < 0
+		|| (err = snd_pcm_sw_params(pcm, sw)) < 0) {
+		ast_log(LOG_WARNING, "Failed to set ALSA sw params on '%s': %s\n",
+			device, snd_strerror(err));
+		snd_pcm_close(pcm);
+		return err;
+	}
+
+	if ((err = snd_pcm_prepare(pcm)) < 0) {
+		ast_log(LOG_WARNING, "Failed to prepare ALSA device '%s': %s\n",
+			device, snd_strerror(err));
+		snd_pcm_close(pcm);
+		return err;
+	}
+
+	*out = pcm;
+	return 0;
+}
+
+static const char *alsa_device_or_default(const ast_string_field name)
+{
+	if (ast_strlen_zero(name)) {
+		return "default";
+	}
+	return name;
+}
+
+/*!
+ * \brief Capture thread: blocking reads, one Asterisk frame per period.
+ *
+ * Waits with a timeout so stop_stream() only has to set stream_stop and
+ * join; no cross-thread snd_pcm calls are needed.
+ */
+static void *capture_thread_fn(void *data)
+{
+	sim_pvt_t *sim = data;
+	modem_pvt_t *modem = sim->modem;
+	snd_pcm_uframes_t period = modem->rate * FRAME_MS / 1000;
+	snd_pcm_sframes_t n;
+	int err;
+
+	while (!modem->stream_stop) {
+		err = snd_pcm_wait(modem->capture_pcm, 100);
+		if (modem->stream_stop) {
+			break;
+		}
+		if (err == 0) {
+			continue;
+		}
+		if (err < 0 && alsa_capture_recover(modem->capture_pcm, err)) {
+			ast_log(LOG_WARNING, "ALSA capture wait failed on modem '%s': %s\n",
+				modem->identifier, snd_strerror(err));
+			break;
+		}
+
+		n = snd_pcm_readi(modem->capture_pcm, &modem->inbuf[AST_FRIENDLY_OFFSET], period);
+		if (n < 0) {
+			if (alsa_capture_recover(modem->capture_pcm, n)) {
+				ast_log(LOG_WARNING, "ALSA capture failed on modem '%s': %s\n",
+					modem->identifier, snd_strerror(n));
+				break;
+			}
+			continue;
+		}
+		if (n == 0 || !modem->owner) {
+			continue;
+		}
+
+		struct ast_frame f = {
+			.frametype = AST_FRAME_VOICE,
+			.subclass.format = modem->format,
+			.src = "chan_modemmanager_capture",
+			.data.ptr = &modem->inbuf[AST_FRIENDLY_OFFSET],
+			.offset = AST_FRIENDLY_OFFSET,
+			.datalen = (int)(n * sizeof(int16_t)),
+			.samples = (int)n,
+		};
+		ast_queue_frame(modem->owner, &f);
+	}
+
+	return NULL;
+}
+
+static void close_stream(modem_pvt_t *modem)
+{
+	if (modem->capture_pcm) {
+		snd_pcm_close(modem->capture_pcm);
+		modem->capture_pcm = NULL;
+	}
+	if (modem->playback_pcm) {
+		snd_pcm_close(modem->playback_pcm);
+		modem->playback_pcm = NULL;
+	}
+}
+
+/*!
+ * \brief Open capture+playback at a common rate and pick the channel format.
+ *
+ * Requests exactly 8000 Hz first, then 16000 Hz; opened through plug-capable
+ * device strings the plug layer converts for cards whose native rate
+ * differs, so a failure here means the device is genuinely unusable. The
+ * channel format follows whichever rate succeeded — the old behavior of
+ * silently ending up with ast_format_none is impossible.
+ *
+ * \note This function expects the pvt lock to be held.
+ */
 static int open_stream(sim_pvt_t *sim)
 {
-	PaError res = paInternalError;
-	PaDeviceIndex idx, num_devices;
+	modem_pvt_t *modem = sim->modem;
+	static const unsigned int rates[] = { 8000, 16000 };
+	const char *in_dev = alsa_device_or_default(modem->input_device);
+	const char *out_dev = alsa_device_or_default(modem->output_device);
+	size_t i;
 
-	PaStreamParameters input_params = {
-		.channelCount = 1,
-		.sampleFormat = paInt16,
-		.suggestedLatency = (1.0 / 100.0),
-		.device = pa_pick_input_device_by_name(sim->modem->input_device),
-	};
-	PaStreamParameters output_params = {
-		.channelCount = 1,
-		.sampleFormat = paInt16,
-		.suggestedLatency = (1.0 / 100.0),
-		.device = pa_pick_output_device_by_name(sim->modem->output_device),
-	};
-
-	if (input_params.device == paNoDevice || output_params.device == paNoDevice) {
-		return paInternalError;
+	if (modem->capture_pcm || modem->playback_pcm) {
+		return 0;
 	}
 
-	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(input_params.device),
-		*output_devinfo = Pa_GetDeviceInfo(output_params.device);
-	if (input_devinfo->defaultSampleRate != output_devinfo->defaultSampleRate) {
-		ast_log(LOG_WARNING, "Default sample rate for input and output does not match. Stream may not work correctly.\n");
+	for (i = 0; i < ARRAY_LEN(rates); i++) {
+		if (alsa_open_pcm(&modem->capture_pcm, in_dev, SND_PCM_STREAM_CAPTURE, rates[i])) {
+			continue;
+		}
+		if (alsa_open_pcm(&modem->playback_pcm, out_dev, SND_PCM_STREAM_PLAYBACK, rates[i])) {
+			snd_pcm_close(modem->capture_pcm);
+			modem->capture_pcm = NULL;
+			continue;
+		}
+		modem->rate = rates[i];
+		modem->format = rates[i] == 16000 ? ast_format_slin16 : ast_format_slin;
+		ast_verb(3, "Opened ALSA capture '%s' / playback '%s' at %u Hz\n",
+			in_dev, out_dev, modem->rate);
+		return 0;
 	}
 
-	res = Pa_OpenStream(&sim->modem->input_stream, &input_params, NULL,
-		input_devinfo->defaultSampleRate, NUM_SAMPLES, paNoFlag, stream_cb, sim);
-	ast_verb(1, "Input defaultSampleRate=%.0f", input_devinfo->defaultSampleRate);
-
-	res = Pa_OpenStream(&sim->modem->output_stream, NULL, &output_params,
-		output_devinfo->defaultSampleRate, NUM_SAMPLES, paNoFlag, NULL, NULL);
-	ast_verb(1, "Output defaultSampleRate=%.0f", output_devinfo->defaultSampleRate);
-
-	if(sim->modem->input_stream == NULL) {
-		ast_log(LOG_ERROR, "No input stream for modem '%s'\n", sim->modem->identifier);
-	}
-
-	if(sim->modem->output_stream == NULL) {
-		ast_log(LOG_ERROR, "No output stream for modem '%s'\n", sim->modem->identifier);
-	}
-
-	return res;
+	ast_log(LOG_ERROR, "Unable to open ALSA devices '%s'/'%s' at 8 or 16 kHz for modem '%s'\n",
+		in_dev, out_dev, modem->identifier);
+	return -1;
 }
 
 static int start_stream(sim_pvt_t *sim)
 {
-	PaError res;
 	int ret_val = 0;
 
 	modemmanager_pvt_lock(sim->modem);
@@ -914,38 +1030,38 @@ static int start_stream(sim_pvt_t *sim)
 	 * stream is started, if this is the case sim->modem->owner will be NULL
 	 * and start_stream should be aborted. */
 	if (sim->modem->streamstate || !sim->modem->owner) {
-		ast_verb(1, "Unable to start stream.\n");
+		ast_debug(1, "Unable to start stream\n");
 		goto return_unlock;
 	}
 
+	if (open_stream(sim)) {
+		ret_val = -1;
+		goto return_unlock;
+	}
+
+	/* Capture streams do not auto-start from snd_pcm_wait(); without this
+	 * the capture thread would poll forever and no frames would flow. */
+	if (snd_pcm_state(sim->modem->capture_pcm) == SND_PCM_STATE_PREPARED) {
+		int err = snd_pcm_start(sim->modem->capture_pcm);
+		if (err < 0) {
+			ast_log(LOG_ERROR, "Failed to start ALSA capture for modem '%s': %s\n",
+				sim->modem->identifier, snd_strerror(err));
+			close_stream(sim->modem);
+			ret_val = -1;
+			goto return_unlock;
+		}
+	}
+
+	sim->modem->stream_stop = 0;
+	if (ast_pthread_create_background(&sim->modem->thread, NULL, capture_thread_fn, sim)) {
+		ast_log(LOG_ERROR, "Failed to create capture thread for modem '%s'\n",
+			sim->modem->identifier);
+		close_stream(sim->modem);
+		ret_val = -1;
+		goto return_unlock;
+	}
 	sim->modem->streamstate = 1;
-	ast_verb(1, "Starting stream\n");
-
-	res = open_stream(sim);
-	if (res != paNoError) {
-		ast_log(LOG_WARNING, "Failed to open stream - (%d) %s\n",
-			res, Pa_GetErrorText(res));
-		ret_val = -1;
-		goto return_unlock;
-	}
-
-	res = Pa_StartStream(sim->modem->input_stream);
-	if (res != paNoError) {
-		ast_log(LOG_WARNING, "Failed to start input stream - (%d) %s\n",
-			res, Pa_GetErrorText(res));
-		ret_val = -1;
-		goto return_unlock;
-	}
-
-	res = Pa_StartStream(sim->modem->output_stream);
-	if (res != paNoError) {
-		ast_log(LOG_WARNING, "Failed to start output stream - (%d) %s\n",
-			res, Pa_GetErrorText(res));
-		ret_val = -1;
-		goto return_unlock;
-	}
-
-	ast_verb(1, "Stream started\n");
+	ast_debug(1, "Stream started\n");
 
 return_unlock:
 	modemmanager_pvt_unlock(sim->modem);
@@ -955,22 +1071,28 @@ return_unlock:
 
 static int stop_stream(sim_pvt_t *sim)
 {
-	if (!sim->modem->streamstate) {
-		ast_verb(1, "Not in streaming (stream=%s). exit.\n", AST_YESNO(sim->modem->streamstate));
-		return 0;
+	pthread_t thread = AST_PTHREADT_NULL;
+
+	modemmanager_pvt_lock(sim->modem);
+	if (sim->modem->streamstate) {
+		sim->modem->streamstate = 0;
+		sim->modem->stream_stop = 1;
+		thread = sim->modem->thread;
+		sim->modem->thread = AST_PTHREADT_NULL;
+	}
+	modemmanager_pvt_unlock(sim->modem);
+
+	/* The capture thread polls with a timeout, so it notices stream_stop
+	 * on its own; no cross-thread snd_pcm calls are needed. */
+	if (thread != AST_PTHREADT_NULL) {
+		pthread_join(thread, NULL);
 	}
 
 	modemmanager_pvt_lock(sim->modem);
-	Pa_AbortStream(sim->modem->input_stream);
-	Pa_AbortStream(sim->modem->output_stream);
-	Pa_CloseStream(sim->modem->input_stream);
-	Pa_CloseStream(sim->modem->output_stream);
-	sim->modem->input_stream = NULL;
-	sim->modem->output_stream = NULL;
-	sim->modem->streamstate = 0;
+	/* PCMs are opened by modemmanager_new() before the stream starts, so
+	 * close them even when the capture thread never ran. */
+	close_stream(sim->modem);
 	modemmanager_pvt_unlock(sim->modem);
-
-	ast_verb(1, "Unlocked stream.\n");
 
 	return 0;
 }
@@ -988,19 +1110,12 @@ static struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, con
 		return NULL;
 	}
 
-	const PaDeviceIndex input_dev_idx = pa_pick_input_device_by_name(sim->modem->input_device);
-	if(input_dev_idx == paNoDevice) {
+	/* Opening the PCMs here (not at stream start) both validates the audio
+	 * device before the call proceeds and determines the channel format
+	 * from the rate that actually opened. */
+	if (open_stream(sim)) {
 		ao2_ref(caps, -1);
 		return NULL;
-	}
-	const PaDeviceInfo *input_devinfo = Pa_GetDeviceInfo(input_dev_idx);
-	if(input_devinfo->defaultSampleRate == (double)16000) {
-		sim->modem->format = ast_format_slin16;
-		ast_verb(1, "pick ast_format_slin16");
-	}
-	else if(input_devinfo->defaultSampleRate == (double)8000) {
-		sim->modem->format = ast_format_slin;
-		ast_verb(1, "pick ast_format_slin");
 	}
 	ast_format_cap_append(caps, sim->modem->format, 0);
 
@@ -1258,21 +1373,23 @@ static int modemmanager_call(struct ast_channel *c, const char *dest, int timeou
 
 static int modemmanager_write(struct ast_channel *chan, struct ast_frame *frame)
 {
-	PaError paret;
 	sim_pvt_t *sim = ast_channel_tech_pvt(chan);
+	snd_pcm_sframes_t n = 0;
 
 	switch(frame->frametype) {
 		case AST_FRAME_VOICE:
-			if(sim->modem->output_stream == NULL
-				|| !Pa_IsStreamActive(sim->modem->output_stream))
-			{
+			modemmanager_pvt_lock(sim->modem);
+			if (sim->modem->playback_pcm == NULL || !sim->modem->streamstate) {
+				modemmanager_pvt_unlock(sim->modem);
 				break;
 			}
-			modemmanager_pvt_lock(sim->modem);
-			paret = Pa_WriteStream(sim->modem->output_stream, frame->data.ptr, frame->samples);
+			n = snd_pcm_writei(sim->modem->playback_pcm, frame->data.ptr, frame->samples);
+			if (n < 0 && !alsa_pcm_recover(sim->modem->playback_pcm, n)) {
+				n = snd_pcm_writei(sim->modem->playback_pcm, frame->data.ptr, frame->samples);
+			}
 			modemmanager_pvt_unlock(sim->modem);
-			if(paret != paNoError && paret != paOutputUnderflowed) {
-				ast_log(LOG_WARNING, "Pa_WriteStream failed: %s\n", Pa_GetErrorText(paret), Pa_GetStreamInfo(sim->modem->output_stream)->sampleRate);
+			if (n < 0) {
+				ast_log(LOG_WARNING, "ALSA playback failed: %s\n", snd_strerror(n));
 			}
 			break;
 		default:
@@ -1321,9 +1438,7 @@ static int modemmanager_indicate(struct ast_channel *chan, int cond, const void 
 
 static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
-	PaDeviceIndex idx, num, def_input, def_output;
 	GError *error = NULL;
-	int ret;
 
 	if (cmd == CLI_INIT) {
 		e->command = "modemmanager list available";
@@ -1394,33 +1509,35 @@ static char *cli_list_available(struct ast_cli_entry *e, int cmd, struct ast_cli
 		g_list_free_full(modems, (GDestroyNotify) g_object_unref);
 	}
 
-	ast_cli(a->fd, "\nAvailable audio devices (I: Default input device, i: Input device, O: Default output device, o: Output device)\n\n");
+	ast_cli(a->fd, "\nAvailable ALSA PCM devices (use the name as input_device/output_device)\n\n");
 
-	num = Pa_GetDeviceCount();
-	if (!num) {
-		ast_cli(a->fd, "(None)\n");
+	void **hints = NULL;
+	if (snd_device_name_hint(-1, "pcm", &hints) < 0 || !hints) {
+		ast_cli(a->fd, "(none)\n");
 		return CLI_SUCCESS;
 	}
+	for (void **h = hints; *h; h++) {
+		char *name = snd_device_name_get_hint(*h, "NAME");
+		char *desc = snd_device_name_get_hint(*h, "DESC");
+		char *ioid = snd_device_name_get_hint(*h, "IOID");
 
-	def_input = Pa_GetDefaultInputDevice();
-	def_output = Pa_GetDefaultOutputDevice();
-	for (idx = 0; idx < num; idx++) {
-		const PaDeviceInfo *dev = Pa_GetDeviceInfo(idx);
-		if (!dev)
-			continue;
-		ast_cli(a->fd, "Device '%s' -  %s%s\n"
-			"\tSampleRate: %f\n"
-			"\tInputLatency: %f\n"
-			"\tOutputLatency: %f\n",
-			dev->name,
-			dev->maxInputChannels ? idx == def_input ? "I" : "i" : "",
-			dev->maxOutputChannels ? idx == def_output ? "O" : "o" : "",
-			dev->defaultSampleRate,
-			dev->defaultLowInputLatency,
-			dev->defaultLowOutputLatency
-		);
+		if (name) {
+			/* DESC may span lines; indent them under the device name */
+			ast_cli(a->fd, "Device '%s'%s%s\n", name,
+				ioid ? " - " : "", S_OR(ioid, ""));
+			if (desc) {
+				char *line, *rest = desc;
+				while ((line = strsep(&rest, "\n"))) {
+					ast_cli(a->fd, "\t%s\n", line);
+				}
+			}
+		}
+
+		ast_std_free(name);
+		ast_std_free(desc);
+		ast_std_free(ioid);
 	}
-
+	snd_device_name_free_hint(hints);
 
 	return CLI_SUCCESS;
 }
@@ -1460,8 +1577,6 @@ static int unload_module(void)
 	g_object_unref(manager);
 	g_object_unref(dbus);
 
-	Pa_Terminate();
-
 	ao2_callback(modems, OBJ_NODATA, g_unref_modem, NULL);
 	ao2_ref(modems, -1);
 	ao2_callback(sims, OBJ_NODATA, g_unref_sim, NULL);
@@ -1492,8 +1607,6 @@ static void *create_mainloop() {
  */
 static int load_module(void)
 {
-	PaError res;
-	GDBusConnection *connection = NULL;
 	GError *error = NULL;
 
 	if (!(modemmanager_tech.capabilities = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT))) {
@@ -1531,13 +1644,6 @@ static int load_module(void)
 	if (load_config(0))
 		goto return_error;
 
-	res = Pa_Initialize();
-	if (res != paNoError) {
-		ast_log(LOG_WARNING, "Failed to initialize audio system - (%d) %s\n",
-			res, Pa_GetErrorText(res));
-		goto return_error_pa_init;
-	}
-
 	if (ast_channel_register(&modemmanager_tech)) {
 		ast_log(LOG_ERROR, "Unable to register channel type 'ModemManager'\n");
 		goto return_error_chan_reg;
@@ -1560,8 +1666,6 @@ return_error_msg_reg:
 	ast_msg_tech_unregister(&msg_tech);
 return_error_chan_reg:
 	ast_channel_unregister(&modemmanager_tech);
-return_error_pa_init:
-	Pa_Terminate();
 return_error_mm_init:
 	g_object_unref(dbus);
 return_error_dbus_init:

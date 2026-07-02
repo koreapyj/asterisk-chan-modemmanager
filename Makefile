@@ -19,7 +19,7 @@ MODULES_DIR      ?= /usr/lib/asterisk/modules
 ASTETCDIR        ?= /etc/asterisk
 DESTDIR          ?=
 
-PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib portaudio-2.0 alsa
+PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa
 
 SRCS := chan_modemmanager.c
 OBJS := $(SRCS:.c=.o)
