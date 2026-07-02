@@ -1187,7 +1187,7 @@ static int modemmanager_digit_begin(struct ast_channel *c, char digit)
 {
 	sim_pvt_t *sim = ast_channel_tech_pvt(c);
 	const gchar dtmf[2] = {digit, '\0'};
-	mm_call_send_dtmf(sim->modem->call, dtmf, NULL, G_CALLBACK(ondtmfsent), sim);
+	mm_call_send_dtmf(sim->modem->call, dtmf, NULL, ondtmfsent, sim);
 	return 0;
 }
 
@@ -1429,12 +1429,24 @@ static struct ast_cli_entry cli_modemmanager[] = {
 	AST_CLI_DEFINE(cli_list_available,     "List available devices"),
 };
 
-static void g_unref_modem(modem_pvt_t *dev) {
-	g_object_unref(dev->device);
+static int g_unref_modem(void *obj, void *arg, int flags)
+{
+	modem_pvt_t *dev = obj;
+	if (dev->device) {
+		g_object_unref(dev->device);
+		dev->device = NULL;
+	}
+	return 0;
 }
 
-static void g_unref_sim(sim_pvt_t *dev) {
-	g_object_unref(dev->device);
+static int g_unref_sim(void *obj, void *arg, int flags)
+{
+	sim_pvt_t *dev = obj;
+	if (dev->device) {
+		g_object_unref(dev->device);
+		dev->device = NULL;
+	}
+	return 0;
 }
 
 static int unload_module(void)
@@ -1450,9 +1462,9 @@ static int unload_module(void)
 
 	Pa_Terminate();
 
-	ao2_callback(modems, 0, g_unref_modem, NULL);
+	ao2_callback(modems, OBJ_NODATA, g_unref_modem, NULL);
 	ao2_ref(modems, -1);
-	ao2_callback(sims, 0, g_unref_sim, NULL);
+	ao2_callback(sims, OBJ_NODATA, g_unref_sim, NULL);
 	ao2_ref(sims, -1);
 
 	g_main_loop_quit(loop);

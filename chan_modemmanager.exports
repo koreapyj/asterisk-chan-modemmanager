@@ -1,0 +1,11 @@
+/*
+ * Only the symbols Asterisk's module loader needs are exported; everything
+ * else stays local so this module cannot collide with other loaded .so files.
+ */
+{
+	global:
+		__internal_chan_modemmanager_self;
+		ast_module_info;
+	local:
+		*;
+};

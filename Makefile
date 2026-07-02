@@ -1,35 +1,59 @@
-PROJM =  chan_modemmanager.so
-chan_modemmanagerm_so_OBJS =  chan_modemmanager.o
-res_mmsd_so_OBJS = res_mmsd.o
-SOURCES = chan_modemmanager.c
-HEADERS = 
+# Makefile for chan_modemmanager, an out-of-tree Asterisk channel driver.
+#
+# All library flags come from pkg-config so the same Makefile serves native
+# Debian/Ubuntu builds, OpenWrt cross builds (override CC/PKG_CONFIG/
+# ASTERISK_INCLUDE from the package recipe) and manual builds.
 
-CC = gcc
-LD = ld
-STRIP = strip
-RM = rm -fr
-INSTALL = install
-CHMOD = chmod
+CC         ?= gcc
+PKG_CONFIG ?= pkg-config
+INSTALL    ?= install
 
-CFLAGS  = -I/usr/include/ModemManager -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/libmm-glib -std=gnu11 -DAST_MODULE_SELF_SYM=__internal_chan_modemmanager_self -fPIC
-LDFLAGS = -lportaudio -lasound -lm -lpthread -lgio-2.0 -lgobject-2.0 -lglib-2.0 -lmm-glib
-SOLINK  = -shared
-LIBS    = 
+MODULE_NAME := chan_modemmanager
+MODULE      := $(MODULE_NAME).so
 
-srcdir = @srcdir@
-VPATH = @srcdir@
+# Asterisk ships no pkg-config file; its headers install straight into
+# $(ASTERISK_INCLUDE)/asterisk*. Debian/Ubuntu: /usr/include (default).
+# OpenWrt: $(STAGING_DIR)/usr/include.
+ASTERISK_INCLUDE ?= /usr/include
+MODULES_DIR      ?= /usr/lib/asterisk/modules
+ASTETCDIR        ?= /etc/asterisk
+DESTDIR          ?=
 
-all: chan_modemmanager.so res_mmsd.so
+PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib portaudio-2.0 alsa
+
+SRCS := chan_modemmanager.c
+OBJS := $(SRCS:.c=.o)
+DEPS := $(OBJS:.o=.d)
+
+WARN_CFLAGS := -Wall -Wextra -Wno-unused-parameter
+
+CFLAGS ?= -O2 -g
+override CFLAGS += -std=gnu11 -fPIC $(WARN_CFLAGS) \
+	-I$(ASTERISK_INCLUDE) \
+	-DAST_MODULE=\"$(MODULE_NAME)\" \
+	-DAST_MODULE_SELF_SYM=__internal_$(MODULE_NAME)_self \
+	$(shell $(PKG_CONFIG) --cflags $(PKGCONFIG_LIBS))
+
+LDLIBS := -lm -lpthread $(shell $(PKG_CONFIG) --libs $(PKGCONFIG_LIBS))
+
+all: $(MODULE)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(MODULE): $(OBJS) $(MODULE_NAME).exports
+	$(CC) -shared -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) \
+		-Wl,--version-script,$(MODULE_NAME).exports -Wl,--warn-common
+
+-include $(DEPS)
+
+install: $(MODULE)
+	$(INSTALL) -d $(DESTDIR)$(MODULES_DIR)
+	$(INSTALL) -m 0755 $(MODULE) $(DESTDIR)$(MODULES_DIR)/
+	$(INSTALL) -d $(DESTDIR)$(ASTETCDIR)
+	$(INSTALL) -m 0644 modemmanager.conf.sample $(DESTDIR)$(ASTETCDIR)/
 
 clean:
-	$(RM) chan_modemmanager.o chan_modemmanager.so res_mmsd.o res_mmsd.so
+	rm -f $(OBJS) $(DEPS) $(MODULE)
 
-chan_modemmanager.so: $(chan_modemmanagerm_so_OBJS) Makefile
-	$(LD) $(LDFLAGS) $(SOLINK) -o $@ $(chan_modemmanagerm_so_OBJS) $(LIBS)
-
-res_mmsd.so: $(res_mmsd_so_OBJS) Makefile
-	$(LD) $(LDFLAGS) $(SOLINK) -o $@ $(res_mmsd_so_OBJS) $(LIBS)
-
-ifneq ($(wildcard .*.d),)
-   include .*.d
-endif
+.PHONY: all clean install
