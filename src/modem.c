@@ -15,6 +15,7 @@
 #include "asterisk/logger.h"
 #include "asterisk/utils.h"
 
+#include "atinit.h"
 #include "audio_alsa.h"
 #include "call.h"
 #include "mm_bus.h"
@@ -108,6 +109,8 @@ static void store_config_modem(modem_pvt_t *pvt, const char *var, const char *va
 	CV_STRFIELD("identifier", pvt, identifier);
 	CV_STRFIELD("input_device", pvt, input_device);
 	CV_STRFIELD("output_device", pvt, output_device);
+	CV_STRFIELD("init_commands", pvt, init_commands);
+	CV_STRFIELD("init_port", pvt, init_port);
 	CV_F("type", NULL);
 
 	ast_log(LOG_WARNING, "Unknown option '%s'\n", var);
@@ -214,6 +217,10 @@ static void on_modem_state_changed(MMModem *device, MMModemState old_state,
 
 	ast_debug(1, "Modem state changed from %d to %d (reason: %d, sim %s)\n",
 		old_state, new_state, reason, sim->identifier);
+
+	if (new_state >= MM_MODEM_STATE_ENABLED && sim->modem) {
+		atinit_kick(sim->modem);
+	}
 }
 
 /*!
@@ -268,6 +275,9 @@ static void resolve_object(MMObject *obj)
 	modem->device = g_object_ref(mm_modem);
 	modem->voice = g_object_ref(mm_voice);
 	modem->messaging = mm_msg ? g_object_ref(mm_msg) : NULL;
+	/* A (re)attached device is a new appearance: its volatile AT state
+	 * reset too, so init commands legitimately run again. */
+	modem->atinit_done = 0;
 	if (!modem->serializer) {
 		char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
 
@@ -314,6 +324,12 @@ static void resolve_object(MMObject *obj)
 	ast_verb(2, "Resolved modem '%s' at %s with sim '%s' (exten %s)\n",
 		modem->identifier, mm_modem_get_path(mm_modem),
 		sim->identifier, S_OR(sim->exten, "<none>"));
+
+	/* Covers modems that are already enabled when we (re)start: no
+	 * further state-changed signal would fire to trigger this. */
+	if (mm_modem_get_state(mm_modem) >= MM_MODEM_STATE_ENABLED) {
+		atinit_kick(modem);
+	}
 
 done:
 	if (mm_sim) {

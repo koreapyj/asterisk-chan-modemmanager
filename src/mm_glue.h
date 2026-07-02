@@ -81,6 +81,10 @@ typedef struct modem_pvt {
 		AST_STRING_FIELD(output_device);
 		/*! ALSA device autodetected from the modem's USB sysfs path */
 		AST_STRING_FIELD(detected_device);
+		/*! Semicolon-separated init AT commands (audio bring-up) */
+		AST_STRING_FIELD(init_commands);
+		/*! Explicit AT port for init commands (optional) */
+		AST_STRING_FIELD(init_port);
 	);
 	/*! Current channel for this device */
 	struct ast_channel *owner;
@@ -97,6 +101,8 @@ typedef struct modem_pvt {
 	/*! Set during a reload so that we know to destroy this if it is no
 	 *  longer in the configuration file. */
 	unsigned int destroy:1;
+	/*! Init AT commands already ran for the current modem appearance */
+	unsigned int atinit_done:1;
 	/*! Input buffer */
 	char inbuf[NUM_SAMPLES * sizeof(int16_t) + AST_FRIENDLY_OFFSET];
 	/*! Modem device (owned ref, NULL when unresolved) */

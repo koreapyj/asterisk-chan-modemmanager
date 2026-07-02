@@ -15,6 +15,20 @@
 ;                             ; are ALSA device names; old PortAudio device names must be
 ;                             ; updated. Prefer plug-capable devices (plughw:/default) so
 ;                             ; sample-rate conversion is available.
+; init_commands =             ; Semicolon-separated AT commands sent once per modem
+;                             ; appearance (boot/replug), intended to bring up functions
+;                             ; this driver consumes -- e.g. Quectel modems need
+;                             ; "AT+QPCMV=1,2" after every boot to route voice PCM over
+;                             ; the USB audio function. This is not a general provisioning
+;                             ; interface; ModemManager keeps owning call/SMS signaling.
+;                             ; Example: init_commands = AT+QPCMV=1,2
+; init_port =                 ; Optional explicit AT tty for init_commands (e.g.
+;                             ; /dev/ttyUSB3). When unset, a non-primary AT port reported
+;                             ; by ModemManager is picked automatically; each candidate
+;                             ; must answer a bare "AT" probe before it is used. For a
+;                             ; guaranteed collision-free port, tag one AT port with
+;                             ; ID_MM_PORT_IGNORE=1 in a udev rule and point init_port at
+;                             ; it.
 
 ; ----------------------------- JITTER BUFFER CONFIGURATION --------------------------
 ; jbenable = yes              ; Enables the use of a jitterbuffer on the receiving side of an

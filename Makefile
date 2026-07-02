@@ -56,15 +56,21 @@ install: $(MODULE)
 	$(INSTALL) -d $(DESTDIR)$(ASTETCDIR)
 	$(INSTALL) -m 0644 modemmanager.conf.sample $(DESTDIR)$(ASTETCDIR)/
 
-check: tests/test_audio_detect
+TEST_BINS := tests/test_audio_detect tests/test_at_tty
+
+check: $(TEST_BINS)
 	tests/test_audio_detect
+	tests/test_at_tty
 
 # Host unit tests: pure libc, no Asterisk/GLib needed
 tests/test_audio_detect: tests/test_audio_detect.c src/audio_detect.c src/audio_detect.h
 	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_audio_detect.c src/audio_detect.c
 
+tests/test_at_tty: tests/test_at_tty.c src/at_tty.c src/at_tty.h
+	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_at_tty.c src/at_tty.c -lpthread
+
 clean:
 	rm -rf build
-	rm -f $(MODULE) tests/test_audio_detect
+	rm -f $(MODULE) $(TEST_BINS)
 
 .PHONY: all check clean install
