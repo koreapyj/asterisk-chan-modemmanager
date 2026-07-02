@@ -28,4 +28,16 @@ extern const struct ast_msg_tech mm_msg_tech;
  */
 void on_message_added(MMModemMessaging *messaging, const char *path, gboolean received, void *data);
 
+/*!
+ * \brief Rescan SMS already stored on the modem (serializer task).
+ *
+ * Feeds stored BINARY messages (WAP-push MMS notifications) through the
+ * MMS intake — they stay on the modem until the MMS reaches a terminal
+ * state, so notifications that arrived while the module was not watching
+ * are recovered on every modem (re)appearance. Stored text SMS are
+ * skipped: they were delivered when they arrived, and re-delivering on
+ * every reload would duplicate them.
+ */
+void sms_rescan_stored(sim_pvt_t *sim);
+
 #endif /* CHAN_MM_SMS_H */

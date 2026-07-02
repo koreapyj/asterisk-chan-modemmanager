@@ -232,6 +232,87 @@ done:
 	return 0;
 }
 
+static int task_rescan_stored(void *data)
+{
+	sim_pvt_t *sim = data;
+	modem_pvt_t *modem = sim_grab_modem(sim);
+	MMModemMessaging *messaging = NULL;
+	GError *error = NULL;
+	GList *messages, *l;
+	int handed = 0;
+
+	if (!modem) {
+		goto done;
+	}
+	modemmanager_pvt_lock(modem);
+	if (modem->messaging) {
+		messaging = g_object_ref(modem->messaging);
+	}
+	modemmanager_pvt_unlock(modem);
+	if (!messaging) {
+		goto done;
+	}
+
+	mm_bus_push_context();
+	messages = mm_modem_messaging_list_sync(messaging, NULL, &error);
+	mm_bus_pop_context();
+	if (error) {
+		ast_log(LOG_WARNING, "Failed to list stored messages - (%d) %s\n",
+			error->code, error->message);
+		g_clear_error(&error);
+		goto done;
+	}
+
+	for (l = messages; l; l = g_list_next(l)) {
+		MMSms *message = MM_SMS(l->data);
+		const char *text;
+		gsize data_len = 0;
+		const guint8 *bytes;
+
+		if (mm_sms_get_state(message) != MM_SMS_STATE_RECEIVED) {
+			continue;
+		}
+		text = mm_sms_get_text(message);
+		if (text && strcmp(text, "(null)")) {
+			continue; /* text SMS: was delivered on arrival */
+		}
+		bytes = mm_sms_get_data(message, &data_len);
+		if (bytes && data_len) {
+			mms_on_wap_push_sms(sim, bytes, data_len,
+				mm_sms_get_number(message), mm_sms_get_path(message));
+			handed++;
+		}
+	}
+	g_list_free_full(messages, g_object_unref);
+
+	if (handed) {
+		ast_verb(2, "Rescan found %d stored binary message(s) on sim %s\n",
+			handed, sim->identifier);
+	}
+
+done:
+	if (messaging) {
+		g_object_unref(messaging);
+	}
+	unref_modem(modem);
+	unref_sim(sim);
+	return 0;
+}
+
+void sms_rescan_stored(sim_pvt_t *sim)
+{
+	modem_pvt_t *modem = sim_grab_modem(sim);
+
+	if (!modem) {
+		return;
+	}
+	if (modem->serializer
+		&& ast_taskprocessor_push(modem->serializer, task_rescan_stored, ref_sim(sim))) {
+		unref_sim(sim);
+	}
+	unref_modem(modem);
+}
+
 void on_message_added(MMModemMessaging *messaging, const char *path, gboolean received, void *data)
 {
 	sim_pvt_t *sim = data;

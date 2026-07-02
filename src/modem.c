@@ -352,6 +352,9 @@ static void resolve_object(MMObject *obj)
 		atinit_kick(modem);
 	}
 
+	/* Recover MMS notifications that arrived while we were not watching */
+	sms_rescan_stored(sim);
+
 done:
 	if (mm_sim) {
 		g_object_unref(mm_sim);
