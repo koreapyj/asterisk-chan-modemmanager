@@ -10,7 +10,7 @@
  * Run with `make check`.
  */
 
-#include "../audio_detect.h"
+#include "../src/audio_detect.h"
 
 #include <limits.h>
 #include <stdio.h>

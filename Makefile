@@ -21,8 +21,8 @@ DESTDIR          ?=
 
 PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa
 
-SRCS := chan_modemmanager.c audio_detect.c
-OBJS := $(SRCS:.c=.o)
+SRCS := $(wildcard src/*.c)
+OBJS := $(SRCS:src/%.c=build/%.o)
 DEPS := $(OBJS:.o=.d)
 
 WARN_CFLAGS := -Wall -Wextra -Wno-unused-parameter
@@ -38,12 +38,15 @@ LDLIBS := -lm -lpthread $(shell $(PKG_CONFIG) --libs $(PKGCONFIG_LIBS))
 
 all: $(MODULE)
 
-%.o: %.c
+build:
+	@mkdir -p build
+
+build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-$(MODULE): $(OBJS) $(MODULE_NAME).exports
+$(MODULE): $(OBJS) src/$(MODULE_NAME).exports
 	$(CC) -shared -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) \
-		-Wl,--version-script,$(MODULE_NAME).exports -Wl,--warn-common
+		-Wl,--version-script,src/$(MODULE_NAME).exports -Wl,--warn-common
 
 -include $(DEPS)
 
@@ -57,10 +60,11 @@ check: tests/test_audio_detect
 	tests/test_audio_detect
 
 # Host unit tests: pure libc, no Asterisk/GLib needed
-tests/test_audio_detect: tests/test_audio_detect.c audio_detect.c audio_detect.h
-	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_audio_detect.c audio_detect.c
+tests/test_audio_detect: tests/test_audio_detect.c src/audio_detect.c src/audio_detect.h
+	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_audio_detect.c src/audio_detect.c
 
 clean:
-	rm -f $(OBJS) $(DEPS) $(MODULE) tests/test_audio_detect
+	rm -rf build
+	rm -f $(MODULE) tests/test_audio_detect
 
 .PHONY: all check clean install
