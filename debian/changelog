@@ -1,0 +1,9 @@
+asterisk-chan-modemmanager (1.0.0) unstable; urgency=medium
+
+  * Initial packaging.
+  * ALSA-direct audio with automatic USB-to-ALSA device correlation
+    (PortAudio removed).
+  * Native MMS receive without mmsd-tng.
+  * Per-modem init AT commands over a spare AT tty port.
+
+ -- Yoonji Park <koreapyj@dcmys.kr>  Thu, 02 Jul 2026 16:00:00 +0900

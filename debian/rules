@@ -1,0 +1,20 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+# Debian/Ubuntu asterisk uses a multiarch module directory (astmoddir in
+# asterisk-config); exported so both dh_auto_build and our install target
+# see the same value through the Makefile's ?= defaults.
+export MODULES_DIR := /usr/lib/$(MULTIARCH)/asterisk/modules
+
+%:
+	dh $@ --with asterisk
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/asterisk-chan-modemmanager \
+		MODULES_DIR=$(MODULES_DIR)
+
+# make check runs host unit tests (no Asterisk/hardware needed)
+override_dh_auto_test:
+	$(MAKE) check

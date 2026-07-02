@@ -1,0 +1,4 @@
+asterisk:Depends=asterisk-abi-1fb7f5c06d7a2052e38d021b3d8ca151
+shlibs:Depends=libasound2t64 (>= 1.0.16), libc6 (>= 2.42), libglib2.0-0t64 (>= 2.30.0), libmm-glib0 (>= 1.12.6)
+misc:Depends=
+misc:Pre-Depends=

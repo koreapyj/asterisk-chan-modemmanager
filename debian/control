@@ -1,0 +1,24 @@
+Source: asterisk-chan-modemmanager
+Section: comm
+Priority: optional
+Maintainer: Yoonji Park <koreapyj@dcmys.kr>
+Build-Depends: debhelper-compat (= 13),
+               asterisk-dev,
+               libmm-glib-dev,
+               libasound2-dev,
+               libglib2.0-dev,
+               libcurl4-openssl-dev,
+               pkgconf
+Standards-Version: 4.6.2
+Homepage: https://github.com/koreapyj/asterisk-chan-modemmanager
+Rules-Requires-Root: no
+
+Package: asterisk-chan-modemmanager
+Architecture: any
+Depends: ${asterisk:Depends}, ${shlibs:Depends}, ${misc:Depends}
+Recommends: modemmanager
+Description: ModemManager channel driver for Asterisk
+ Asterisk channel driver that places and receives voice calls, SMS and
+ MMS through ModemManager over D-Bus, with ALSA-direct audio, automatic
+ USB-to-ALSA device correlation and per-modem init AT commands (e.g.
+ Quectel AT+QPCMV=1,2 for voice over the USB audio function).
