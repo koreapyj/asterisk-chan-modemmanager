@@ -19,7 +19,7 @@ MODULES_DIR      ?= /usr/lib/asterisk/modules
 ASTETCDIR        ?= /etc/asterisk
 DESTDIR          ?=
 
-PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa
+PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa libcurl
 
 # src/mms/vendor/*.c is mmsd-tng's codec (see provenance headers in that
 # directory); src/mms/*.c is this driver's own boundary code around it.
@@ -74,12 +74,14 @@ install: $(MODULE)
 	$(INSTALL) -d $(DESTDIR)$(ASTETCDIR)
 	$(INSTALL) -m 0644 modemmanager.conf.sample $(DESTDIR)$(ASTETCDIR)/
 
-TEST_BINS := tests/test_audio_detect tests/test_at_tty tests/test_mms_codec
+TEST_BINS := tests/test_audio_detect tests/test_at_tty tests/test_mms_codec \
+	tests/test_mms_fetch
 
 check: $(TEST_BINS)
 	tests/test_audio_detect
 	tests/test_at_tty
 	tests/test_mms_codec
+	tests/test_mms_fetch
 
 # Host unit tests: pure libc, no Asterisk/GLib needed
 tests/test_audio_detect: tests/test_audio_detect.c src/audio_detect.c src/audio_detect.h
@@ -102,6 +104,17 @@ tests/test_mms_codec: tests/test_mms_codec.c src/mms/mms_codec.c src/mms/mms_cod
 		tests/test_mms_codec.c src/mms/mms_codec.c \
 		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c \
 		$(shell $(PKG_CONFIG) --cflags --libs glib-2.0)
+
+# Integration test for the fetch layer: glib (codec) + libcurl, a local
+# HTTP stub stands in for the carrier MMSC. Same vendor-only warning
+# suppressions as the codec test.
+tests/test_mms_fetch: tests/test_mms_fetch.c src/mms/mms_fetch.c src/mms/mms_fetch.h \
+		src/mms/mms_codec.c src/mms/mms_codec.h \
+		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c
+	$(CC) -Wall -Wextra -Wno-unused-parameter -Wno-enum-conversion -std=gnu11 -g -o $@ \
+		tests/test_mms_fetch.c src/mms/mms_fetch.c src/mms/mms_codec.c \
+		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c \
+		$(shell $(PKG_CONFIG) --cflags --libs glib-2.0 libcurl) -lpthread
 
 clean:
 	rm -rf build

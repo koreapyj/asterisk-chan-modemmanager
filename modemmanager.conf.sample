@@ -70,3 +70,27 @@
 ; language = en
 ; overridecontext = no
 ; mohinterpret = default
+;
+; --------------------------------- MMS RECEIVE -----------------------------------
+; MMS is fetched natively (no mmsd-tng): a WAP-push notification arrives as a
+; binary SMS, the message is downloaded from your carrier's MMSC over HTTP and
+; text parts are delivered to the message context; other attachments are
+; written to the spool directory and referenced through MMS_ATTACHMENT_*
+; message variables. Routing to the MMSC (the MMS APN bearer and any routes)
+; must be set up outside Asterisk, exactly as with mmsd-tng before.
+;
+; mmsc =                      ; Carrier MMSC URL (e.g. http://mms.example.com/mms/wapenc).
+;                             ; Unset = MMS disabled for this SIM; notifications stay on
+;                             ; the modem.
+; mms_proxy =                 ; Optional MMS proxy as host:port (plain HTTP forward proxy).
+; mms_interface =             ; Optional netdev to bind fetches to (the MMS APN bearer,
+;                             ; e.g. wwan0).
+; mms_context =               ; Context for delivered MMS. Defaults to message_context,
+;                             ; then context.
+; mms_spool = /var/spool/asterisk/mms   ; Attachment spool directory.
+; mms_max_size = 1048576      ; Response size cap in bytes.
+; mms_fetch_timeout = 30      ; Whole-transfer timeout in seconds.
+; mms_max_retries = 4         ; Fetch attempts (backoff 30s/2m/10m) before giving up.
+; mms_ack = yes               ; Send M-NotifyResp.ind after a successful fetch so the
+;                             ; carrier stops re-sending the notification.
+; mms_user_agent =            ; Optional User-Agent override for MMSC requests.

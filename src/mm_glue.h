@@ -147,11 +147,33 @@ typedef struct sim_pvt {
 		AST_STRING_FIELD(language);
 		/*! Default parkinglot */
 		AST_STRING_FIELD(parkinglot);
+		/*! MMSC base URL; unset = MMS disabled for this SIM */
+		AST_STRING_FIELD(mmsc);
+		/*! MMS proxy "host:port" (plain HTTP forward proxy) */
+		AST_STRING_FIELD(mms_proxy);
+		/*! Bind MMS fetches to this netdev (the MMS APN bearer) */
+		AST_STRING_FIELD(mms_interface);
+		/*! Context for delivered MMS (falls back to message_context/context) */
+		AST_STRING_FIELD(mms_context);
+		/*! User-Agent override for MMSC requests */
+		AST_STRING_FIELD(mms_user_agent);
+		/*! Attachment spool directory */
+		AST_STRING_FIELD(mms_spool);
 	);
+	/*! Response size cap in bytes */
+	unsigned int mms_max_size;
+	/*! Whole-transfer timeout in seconds */
+	unsigned int mms_fetch_timeout;
+	/*! Fetch attempts before giving up */
+	unsigned int mms_max_retries;
 	/*! Automatically answer incoming calls */
 	unsigned int autoanswer:1;
 	/*! Ignore context in the console dial CLI command */
 	unsigned int overridecontext:1;
+	/*! Send M-NotifyResp.ind after a successful fetch */
+	unsigned int mms_ack:1;
+	/*! "MMS disabled" already logged for this SIM this load */
+	unsigned int mms_warned:1;
 	/*! Set during a reload for destroy-if-unconfigured semantics */
 	unsigned int destroy:1;
 	/*! Assigned modem (owned ao2 ref, NULL when unresolved) */

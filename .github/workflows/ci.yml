@@ -33,3 +33,74 @@ jobs:
           make install DESTDIR="$PWD/destdir"
           test -f destdir/usr/lib/asterisk/modules/chan_modemmanager.so
           test -f destdir/etc/asterisk/modemmanager.conf.sample
+
+  debian:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper pkgconf \
+            asterisk-dev libmm-glib-dev libasound2-dev \
+            libglib2.0-dev libcurl4-openssl-dev lintian
+
+      - name: dpkg-buildpackage
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: lintian
+        run: lintian ../asterisk-chan-modemmanager_*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: /__w/**/asterisk-chan-modemmanager_*.deb
+          if-no-files-found: warn
+
+  openwrt-sdk:
+    runs-on: ubuntu-latest
+    env:
+      OPENWRT_RELEASE: "25.12.5"
+      OPENWRT_TARGET: x86/64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch OpenWrt SDK
+        run: |
+          base="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${OPENWRT_TARGET}"
+          sdk=$(curl -fsSL "$base/sha256sums" | grep -o 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.[a-z]*' | head -1)
+          curl -fsSL -o sdk.tar "$base/$sdk"
+          mkdir sdk && tar --strip-components=1 -xaf sdk.tar -C sdk
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            sdk/dl
+            sdk/build_dir
+            sdk/staging_dir/target-*
+          key: openwrt-sdk-${{ env.OPENWRT_RELEASE }}-${{ env.OPENWRT_TARGET }}
+
+      - name: Configure feeds
+        run: |
+          cd sdk
+          echo "src-link modemmanager_local $GITHUB_WORKSPACE/contrib/openwrt" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install asterisk-chan-modemmanager
+          make defconfig
+
+      - name: Build package
+        run: |
+          cd sdk
+          make package/asterisk-chan-modemmanager/compile V=s -j"$(nproc)" \
+            ASTERISK_CHAN_MM_SOURCE_URL="file://$GITHUB_WORKSPACE" \
+            ASTERISK_CHAN_MM_SOURCE_VERSION="$GITHUB_SHA"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-package
+          path: sdk/bin/packages/*/modemmanager_local/asterisk-chan-modemmanager*
+          if-no-files-found: warn

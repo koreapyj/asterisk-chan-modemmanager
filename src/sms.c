@@ -15,6 +15,7 @@
 #include "asterisk/utils.h"
 
 #include "mm_bus.h"
+#include "mms/mms.h"
 #include "sim.h"
 #include "sms.h"
 
@@ -197,9 +198,16 @@ static int task_message_added(void *data)
 		if (text && strcmp(text, "(null)")) {
 			deliver_text_sms(sim, message);
 		} else {
-			/* Binary payload: WAP-push (MMS notification) intake lands
-			 * with the native MMS subsystem. */
-			ast_debug(1, "Ignoring binary SMS %s (MMS support pending)\n", t->path);
+			/* Binary payload: WAP push carrying an MMS notification */
+			gsize data_len = 0;
+			const guint8 *data = mm_sms_get_data(message, &data_len);
+
+			if (data && data_len) {
+				mms_on_wap_push_sms(sim, data, data_len,
+					mm_sms_get_number(message), t->path);
+			} else {
+				ast_debug(1, "Received SMS %s has neither text nor data\n", t->path);
+			}
 		}
 	}
 

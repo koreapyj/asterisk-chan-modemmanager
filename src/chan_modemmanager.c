@@ -55,6 +55,7 @@
 #include "cli.h"
 #include "config.h"
 #include "mm_bus.h"
+#include "mms/mms.h"
 #include "modem.h"
 #include "sim.h"
 #include "sms.h"
@@ -68,6 +69,9 @@ static int unload_module(void)
 
 	/* No new hotplug resolution. */
 	modem_unwatch_manager();
+
+	/* Stop and join the MMS fetch worker before device teardown. */
+	mms_shutdown();
 
 	/* Stop streams (joins capture threads), disconnect every GObject
 	 * signal, drop MM object refs. */
@@ -107,8 +111,12 @@ static int load_module(void)
 		goto return_error_bus;
 	}
 
-	if (modem_watch_manager()) {
+	if (mms_init()) {
 		goto return_error_bus;
+	}
+
+	if (modem_watch_manager()) {
+		goto return_error_mms;
 	}
 
 	if (ast_channel_register(&modemmanager_tech)) {
@@ -133,6 +141,8 @@ return_error_chan:
 	ast_channel_unregister(&modemmanager_tech);
 return_error_watch:
 	modem_unwatch_manager();
+return_error_mms:
+	mms_shutdown();
 return_error_bus:
 	modem_detach_all();
 	sim_detach_all();

@@ -58,7 +58,18 @@ static void set_sim_defaults(sim_pvt_t *pvt)
 	ast_string_field_set(pvt, exten, NULL);
 	ast_string_field_set(pvt, language, "");
 	ast_string_field_set(pvt, parkinglot, "");
+	ast_string_field_set(pvt, mmsc, "");
+	ast_string_field_set(pvt, mms_proxy, "");
+	ast_string_field_set(pvt, mms_interface, "");
+	ast_string_field_set(pvt, mms_context, "");
+	ast_string_field_set(pvt, mms_user_agent, "");
+	ast_string_field_set(pvt, mms_spool, "/var/spool/asterisk/mms");
 
+	pvt->mms_max_size = 1048576;
+	pvt->mms_fetch_timeout = 30;
+	pvt->mms_max_retries = 4;
+	pvt->mms_ack = 1;
+	pvt->mms_warned = 0;
 	pvt->overridecontext = 0;
 	pvt->autoanswer = 0;
 }
@@ -79,6 +90,16 @@ static void store_config_sim(sim_pvt_t *pvt, const char *var, const char *value)
 	CV_BOOL("overridecontext", pvt->overridecontext);
 	CV_STRFIELD("mohinterpret", pvt, mohinterpret);
 	CV_STRFIELD("parkinglot", pvt, parkinglot);
+	CV_STRFIELD("mmsc", pvt, mmsc);
+	CV_STRFIELD("mms_proxy", pvt, mms_proxy);
+	CV_STRFIELD("mms_interface", pvt, mms_interface);
+	CV_STRFIELD("mms_context", pvt, mms_context);
+	CV_STRFIELD("mms_user_agent", pvt, mms_user_agent);
+	CV_STRFIELD("mms_spool", pvt, mms_spool);
+	CV_UINT("mms_max_size", pvt->mms_max_size);
+	CV_UINT("mms_fetch_timeout", pvt->mms_fetch_timeout);
+	CV_UINT("mms_max_retries", pvt->mms_max_retries);
+	CV_BOOL("mms_ack", pvt->mms_ack);
 	CV_F("type", NULL);
 
 	ast_log(LOG_WARNING, "Unknown option '%s'\n", var);
