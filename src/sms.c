@@ -200,9 +200,11 @@ static int task_message_added(void *data)
 	}
 
 	if (mm_sms_get_state(message) == MM_SMS_STATE_RECEIVED) {
+		/* libmm-glib reports textless (binary) SMS as an EMPTY string,
+		 * not NULL; "(null)" covers older ModemManager quirks. */
 		const char *text = mm_sms_get_text(message);
 
-		if (text && strcmp(text, "(null)")) {
+		if (!ast_strlen_zero(text) && strcmp(text, "(null)")) {
 			deliver_text_sms(sim, message);
 		} else {
 			/* Binary payload: WAP push carrying an MMS notification */
@@ -273,7 +275,7 @@ static int task_rescan_stored(void *data)
 			continue;
 		}
 		text = mm_sms_get_text(message);
-		if (text && strcmp(text, "(null)")) {
+		if (!ast_strlen_zero(text) && strcmp(text, "(null)")) {
 			continue; /* text SMS: was delivered on arrival */
 		}
 		bytes = mm_sms_get_data(message, &data_len);
