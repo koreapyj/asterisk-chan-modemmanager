@@ -21,7 +21,7 @@ DESTDIR          ?=
 
 PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa
 
-SRCS := chan_modemmanager.c
+SRCS := chan_modemmanager.c audio_detect.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(OBJS:.o=.d)
 
@@ -53,7 +53,14 @@ install: $(MODULE)
 	$(INSTALL) -d $(DESTDIR)$(ASTETCDIR)
 	$(INSTALL) -m 0644 modemmanager.conf.sample $(DESTDIR)$(ASTETCDIR)/
 
-clean:
-	rm -f $(OBJS) $(DEPS) $(MODULE)
+check: tests/test_audio_detect
+	tests/test_audio_detect
 
-.PHONY: all clean install
+# Host unit tests: pure libc, no Asterisk/GLib needed
+tests/test_audio_detect: tests/test_audio_detect.c audio_detect.c audio_detect.h
+	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_audio_detect.c audio_detect.c
+
+clean:
+	rm -f $(OBJS) $(DEPS) $(MODULE) tests/test_audio_detect
+
+.PHONY: all check clean install

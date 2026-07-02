@@ -65,6 +65,8 @@
 #include "asterisk/stasis_channels.h"
 #include "asterisk/format_cache.h"
 
+#include "audio_detect.h"
+
 /*!
  * \brief Samples per 20ms frame at the highest supported rate (16kHz).
  * Sizes the per-modem input buffer; the actual per-frame count is
@@ -117,6 +119,8 @@ typedef struct modem_pvt {
 		AST_STRING_FIELD(identifier);
 		AST_STRING_FIELD(input_device);
 		AST_STRING_FIELD(output_device);
+		/*! ALSA device autodetected from the modem's USB sysfs path */
+		AST_STRING_FIELD(detected_device);
 	);
 	/*! Current channel for this device */
 	struct ast_channel *owner;
@@ -231,6 +235,7 @@ static int modemmanager_send(const struct ast_msg *msg, const char *to, const ch
 
 static void oncalldtmfreceived(MMCall *call, char *dtmf, sim_pvt_t *sim);
 static void oncallstatechanged(MMCall *call, MMCallState old, MMCallState new, MMCallStateReason reason, sim_pvt_t *sim);
+static void alsa_autodetect_devices(modem_pvt_t *modem);
 
 static struct ast_channel_tech modemmanager_tech = {
 	.type = "ModemManager",
@@ -748,6 +753,12 @@ static int load_config(int reload)
 			ast_verb(1, "Resolved modem %s at %s",
 				mm_modem_get_device_identifier(mm_modem),
 				mm_modem_get_path(mm_modem));
+			if (ast_strlen_zero(modem->input_device)
+				|| !strcasecmp(modem->input_device, "auto")
+				|| ast_strlen_zero(modem->output_device)
+				|| !strcasecmp(modem->output_device, "auto")) {
+				alsa_autodetect_devices(modem);
+			}
 			sim_pvt_t *sim = find_sim(mm_sim_get_identifier(mm_sim));
 			if(!sim) {
 				goto unref_mm;
@@ -900,12 +911,53 @@ static int alsa_open_pcm(snd_pcm_t **out, const char *device, snd_pcm_stream_t d
 	return 0;
 }
 
-static const char *alsa_device_or_default(const ast_string_field name)
+/*!
+ * \brief Resolve the ALSA device to use for one direction.
+ *
+ * Precedence: explicit config value (anything but empty/"auto", including
+ * "default") > autodetected device > nothing (audio refused with a clear
+ * error rather than silently guessing).
+ */
+static const char *alsa_pick_device(const ast_string_field configured, const ast_string_field detected)
 {
-	if (ast_strlen_zero(name)) {
-		return "default";
+	if (!ast_strlen_zero(configured) && strcasecmp(configured, "auto")) {
+		return configured;
 	}
-	return name;
+	if (!ast_strlen_zero(detected)) {
+		return detected;
+	}
+	return NULL;
+}
+
+/*!
+ * \brief Correlate the modem's USB sysfs path with an ALSA card.
+ *
+ * Runs once per modem appearance (from the config/device resolution pass);
+ * the result is cached in detected_device so per-call stream setup does no
+ * sysfs walking.
+ */
+static void alsa_autodetect_devices(modem_pvt_t *modem)
+{
+	const char *phys = mm_modem_get_device(modem->device);
+	char err[256];
+	char dev[32];
+	int card;
+
+	if (ast_strlen_zero(phys)) {
+		ast_log(LOG_WARNING, "Modem '%s' reports no physical device path; "
+			"cannot autodetect audio. Set input_device/output_device.\n",
+			modem->identifier);
+		return;
+	}
+	if (mm_audio_card_for_physdev("/sys", phys, &card, err, sizeof(err))) {
+		ast_log(LOG_WARNING, "ALSA autodetect failed for modem '%s': %s. "
+			"Set input_device/output_device in modemmanager.conf.\n",
+			modem->identifier, err);
+		return;
+	}
+	snprintf(dev, sizeof(dev), "plughw:%d,0", card);
+	ast_string_field_set(modem, detected_device, dev);
+	ast_verb(2, "Modem '%s': autodetected ALSA device '%s'\n", modem->identifier, dev);
 }
 
 /*!
@@ -991,12 +1043,19 @@ static int open_stream(sim_pvt_t *sim)
 {
 	modem_pvt_t *modem = sim->modem;
 	static const unsigned int rates[] = { 8000, 16000 };
-	const char *in_dev = alsa_device_or_default(modem->input_device);
-	const char *out_dev = alsa_device_or_default(modem->output_device);
+	const char *in_dev = alsa_pick_device(modem->input_device, modem->detected_device);
+	const char *out_dev = alsa_pick_device(modem->output_device, modem->detected_device);
 	size_t i;
 
 	if (modem->capture_pcm || modem->playback_pcm) {
 		return 0;
+	}
+
+	if (!in_dev || !out_dev) {
+		ast_log(LOG_ERROR, "No ALSA device for modem '%s' (autodetect failed or "
+			"did not run); set input_device/output_device in modemmanager.conf\n",
+			modem->identifier);
+		return -1;
 	}
 
 	for (i = 0; i < ARRAY_LEN(rates); i++) {

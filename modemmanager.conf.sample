@@ -5,13 +5,16 @@
 ; [modem1]
 ; type = modem
 ; identifier = <org.freedesktop.ModemManager1.Modem.DeviceIdentifier>
-; input_device = default      ; ALSA PCM device strings (e.g. "plughw:CARD=Device,DEV=0").
-; output_device = default     ; Use a name shown by the "modemmanager list available" CLI
-;                             ; command. If unset or "default", the ALSA default device is
-;                             ; used. NOTE: since the switch from PortAudio to ALSA these
-;                             ; values are ALSA device names; old PortAudio device names
-;                             ; must be updated. Prefer plug-capable devices (plughw:/
-;                             ; default) so sample-rate conversion is available.
+; input_device = auto         ; ALSA PCM device strings (e.g. "plughw:CARD=Device,DEV=0"),
+; output_device = auto        ; or "auto" (the default when unset): the driver correlates
+;                             ; the modem's USB sysfs path with the ALSA card of its USB
+;                             ; audio function and uses plughw on that card. Set an
+;                             ; explicit name (shown by "modemmanager list available") only
+;                             ; when autodetection fails or picks the wrong card.
+;                             ; NOTE: since the switch from PortAudio to ALSA these values
+;                             ; are ALSA device names; old PortAudio device names must be
+;                             ; updated. Prefer plug-capable devices (plughw:/default) so
+;                             ; sample-rate conversion is available.
 
 ; ----------------------------- JITTER BUFFER CONFIGURATION --------------------------
 ; jbenable = yes              ; Enables the use of a jitterbuffer on the receiving side of an
