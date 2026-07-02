@@ -84,4 +84,17 @@ define Package/asterisk-chan-modemmanager/install
 		$(1)/etc/asterisk/modemmanager.conf
 endef
 
+define Package/asterisk-chan-modemmanager/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ]; then
+  echo "asterisk-chan-modemmanager: the asterisk user needs the 'audio' group"
+  echo "for call audio (/dev/snd) and 'dialout' for init_commands AT ports."
+  echo "Add it to both groups in /etc/group and restart asterisk."
+  echo "If ModemManager claims every AT port, free one for init_commands with"
+  echo "an ID_MM_PORT_IGNORE udev rule (MM parses /lib/udev/rules.d itself on"
+  echo "OpenWrt) and point init_port at it; see modemmanager.conf."
+fi
+exit 0
+endef
+
 $(eval $(call BuildPackage,asterisk-chan-modemmanager))

@@ -67,6 +67,23 @@ echo 'src-link modemmanager_local /path/to/this/repo/contrib/openwrt' >> feeds.c
 make menuconfig   # Network -> Telephony -> asterisk-chan-modemmanager
 ```
 
+OpenWrt deployment notes (verified on 25.12.5):
+- Asterisk runs as the `asterisk` user: add it to the `audio` group (call
+  audio via `/dev/snd`) and `dialout` (init AT commands) in `/etc/group`,
+  then restart asterisk.
+- ModemManager may hold every AT port (on a QMI-controlled RM500Q it keeps
+  both). To use `init_commands`, free one port with an
+  `ID_MM_PORT_IGNORE` rule — MM parses `/lib/udev/rules.d` itself on
+  OpenWrt even without udev — and point `init_port` at it, e.g.:
+
+  ```
+  # /lib/udev/rules.d/78-mm-chan-modemmanager-init-port.rules
+  ACTION!="add|change|move|bind", GOTO="end"
+  SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="?*", ENV{.MM_USBIFNUM}="$attr{bInterfaceNumber}"
+  ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0800", ENV{.MM_USBIFNUM}=="03", SUBSYSTEM=="tty", ENV{ID_MM_PORT_IGNORE}="1"
+  LABEL="end"
+  ```
+
 ## Configuration
 
 See `modemmanager.conf.sample` for all options. Summary:
