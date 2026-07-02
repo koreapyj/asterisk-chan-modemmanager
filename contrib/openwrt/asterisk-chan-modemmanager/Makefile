@@ -20,6 +20,11 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=asterisk-chan-modemmanager
+# OpenWrt 25.12+ packages with APK (USE_APK default y): the version is
+# packed as $(PKG_VERSION)-r$(PKG_RELEASE) and must stay APK-valid
+# (numeric dotted version, integer release). Keep in sync with
+# debian/changelog.
+PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 ASTERISK_CHAN_MM_SOURCE_URL?=https://github.com/koreapyj/asterisk-chan-modemmanager.git

@@ -57,7 +57,8 @@ Produces `asterisk-chan-modemmanager_*.deb` with the correct
 
 An OpenWrt package lives in `contrib/openwrt/asterisk-chan-modemmanager/`
 (built against OpenWrt 25.12 and the matching `telephony`/`packages`
-feeds). Point a feed at it:
+feeds; 25.12 uses APK as its package manager, so the build produces
+`.apk` packages installed with `apk add`). Point a feed at it:
 
 ```sh
 echo 'src-link modemmanager_local /path/to/this/repo/contrib/openwrt' >> feeds.conf
