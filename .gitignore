@@ -3,3 +3,7 @@
 *.d
 *.conf
 .claude
+tests/test_audio_detect
+tests/test_at_tty
+tests/test_mms_codec
+build/

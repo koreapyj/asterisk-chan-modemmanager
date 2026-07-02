@@ -21,7 +21,9 @@ DESTDIR          ?=
 
 PKGCONFIG_LIBS := glib-2.0 gio-2.0 gobject-2.0 mm-glib alsa
 
-SRCS := $(wildcard src/*.c)
+# src/mms/vendor/*.c is mmsd-tng's codec (see provenance headers in that
+# directory); src/mms/*.c is this driver's own boundary code around it.
+SRCS := $(wildcard src/*.c) $(wildcard src/mms/*.c) $(wildcard src/mms/vendor/*.c)
 OBJS := $(SRCS:src/%.c=build/%.o)
 DEPS := $(OBJS:.o=.d)
 
@@ -41,8 +43,24 @@ all: $(MODULE)
 build:
 	@mkdir -p build
 
+# Single generic pattern rule builds build/%.o for every src/%.c, including
+# the src/mms/ and src/mms/vendor/ subdirectories (build/mms/%.o,
+# build/mms/vendor/%.o): `mkdir -p $(dir $@)` creates whatever subdirectory
+# under build/ the object needs, instead of hand-listing one pattern rule
+# per subdirectory.
 build/%.o: src/%.c | build
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Vendored mmsd-tng code (src/mms/vendor/*.c; see the provenance header at
+# the top of each file) trips one upstream warning under -Wextra:
+# mms_encode_send_req_part_header() in mmsutil.c passes an
+# `enum mms_part_header` where an `enum mms_header` is expected (both are
+# just small header-code enums; this is upstream's code, not ours, so it's
+# suppressed here rather than hand-edited). Scoped to just the vendor
+# objects -- everything else, including the rest of this driver, still
+# builds under the full WARN_CFLAGS above.
+build/mms/vendor/%.o: WARN_CFLAGS += -Wno-enum-conversion
 
 $(MODULE): $(OBJS) src/$(MODULE_NAME).exports
 	$(CC) -shared -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) \
@@ -56,11 +74,12 @@ install: $(MODULE)
 	$(INSTALL) -d $(DESTDIR)$(ASTETCDIR)
 	$(INSTALL) -m 0644 modemmanager.conf.sample $(DESTDIR)$(ASTETCDIR)/
 
-TEST_BINS := tests/test_audio_detect tests/test_at_tty
+TEST_BINS := tests/test_audio_detect tests/test_at_tty tests/test_mms_codec
 
 check: $(TEST_BINS)
 	tests/test_audio_detect
 	tests/test_at_tty
+	tests/test_mms_codec
 
 # Host unit tests: pure libc, no Asterisk/GLib needed
 tests/test_audio_detect: tests/test_audio_detect.c src/audio_detect.c src/audio_detect.h
@@ -68,6 +87,21 @@ tests/test_audio_detect: tests/test_audio_detect.c src/audio_detect.c src/audio_
 
 tests/test_at_tty: tests/test_at_tty.c src/at_tty.c src/at_tty.h
 	$(CC) -Wall -Wextra -std=gnu11 -g -o $@ tests/test_at_tty.c src/at_tty.c -lpthread
+
+# Host unit test for the MMS codec: pure GLib (via pkg-config), no
+# Asterisk/libmm-glib needed -- see src/mms/mms_codec.h. -Wno-unused-parameter
+# and -Wno-enum-conversion apply only because src/mms/vendor/*.c is vendored
+# mmsd-tng code (same two warnings suppressed the same way for the .so build
+# above); src/mms/mms_codec.c and tests/test_mms_codec.c are independently
+# clean under plain -Wall -Wextra.
+tests/test_mms_codec: tests/test_mms_codec.c src/mms/mms_codec.c src/mms/mms_codec.h \
+		src/mms/vendor/wsputil.c src/mms/vendor/wsputil.h \
+		src/mms/vendor/mmsutil.c src/mms/vendor/mmsutil.h \
+		src/mms/vendor/vendor_shim.h
+	$(CC) -Wall -Wextra -Wno-unused-parameter -Wno-enum-conversion -std=gnu11 -g -o $@ \
+		tests/test_mms_codec.c src/mms/mms_codec.c \
+		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c \
+		$(shell $(PKG_CONFIG) --cflags --libs glib-2.0)
 
 clean:
 	rm -rf build
