@@ -49,15 +49,21 @@ static int modemmanager_msg_send(const struct ast_msg *msg, const char *to, cons
 		ast_log(LOG_WARNING, "Unable to find sim '%s'\n", simid);
 		return -1;
 	}
-	if (!sim->modem || !sim->modem->messaging) {
+	{
+		modem_pvt_t *modem = sim_grab_modem(sim);
+
+		if (modem) {
+			modemmanager_pvt_lock(modem);
+			messaging = modem->messaging ? g_object_ref(modem->messaging) : NULL;
+			modemmanager_pvt_unlock(modem);
+			unref_modem(modem);
+		}
+	}
+	if (!messaging) {
 		ast_log(LOG_WARNING, "Sim '%s' has no resolved modem with messaging support\n", simid);
 		res = -1;
 		goto done;
 	}
-
-	modemmanager_pvt_lock(sim->modem);
-	messaging = g_object_ref(sim->modem->messaging);
-	modemmanager_pvt_unlock(sim->modem);
 
 	props = mm_sms_properties_new();
 	mm_sms_properties_set_text(props, ast_msg_get_body(msg));
@@ -154,19 +160,20 @@ static int task_message_added(void *data)
 {
 	struct message_added_task *t = data;
 	sim_pvt_t *sim = t->sim;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMModemMessaging *messaging = NULL;
 	MMSms *message = NULL;
 	GError *error = NULL;
 	GList *messages, *l;
 
-	if (!sim->modem) {
+	if (!modem) {
 		goto done;
 	}
-	modemmanager_pvt_lock(sim->modem);
-	if (sim->modem->messaging) {
-		messaging = g_object_ref(sim->modem->messaging);
+	modemmanager_pvt_lock(modem);
+	if (modem->messaging) {
+		messaging = g_object_ref(modem->messaging);
 	}
-	modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_unlock(modem);
 	if (!messaging) {
 		goto done;
 	}
@@ -218,6 +225,7 @@ done:
 	if (messaging) {
 		g_object_unref(messaging);
 	}
+	unref_modem(modem);
 	unref_sim(sim);
 	ast_free(t->path);
 	ast_free(t);
@@ -227,6 +235,7 @@ done:
 void on_message_added(MMModemMessaging *messaging, const char *path, gboolean received, void *data)
 {
 	sim_pvt_t *sim = data;
+	modem_pvt_t *modem;
 	struct message_added_task *t;
 
 	ast_debug(1, "Message added - %s received: %d (sim %s)\n", path, received, sim->identifier);
@@ -234,20 +243,27 @@ void on_message_added(MMModemMessaging *messaging, const char *path, gboolean re
 	if (!received) {
 		return;
 	}
-	if (!sim->modem || !sim->modem->serializer) {
+	modem = sim_grab_modem(sim);
+	if (!modem) {
+		return;
+	}
+	if (!modem->serializer) {
+		unref_modem(modem);
 		return;
 	}
 
 	t = ast_calloc(1, sizeof(*t));
 	if (!t) {
+		unref_modem(modem);
 		return;
 	}
 	t->sim = ref_sim(sim);
 	t->path = ast_strdup(path);
 
-	if (ast_taskprocessor_push(sim->modem->serializer, task_message_added, t)) {
+	if (ast_taskprocessor_push(modem->serializer, task_message_added, t)) {
 		unref_sim(t->sim);
 		ast_free(t->path);
 		ast_free(t);
 	}
+	unref_modem(modem);
 }

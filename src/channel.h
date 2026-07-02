@@ -23,13 +23,16 @@ extern struct ast_channel_tech modemmanager_tech;
 /*!
  * \brief Allocate the Asterisk channel for a call on this SIM.
  *
- * Opens the ALSA PCMs (validating the audio device and fixing the channel
- * format) and sets modem->owner. Does NOT start the PBX — callers do that
- * after releasing the pvt lock.
+ * Sets modem->owner and bumps the module usecount. Callers must have run
+ * open_stream(modem) beforehand (with no locks held) so the channel format
+ * is fixed. Does NOT start the PBX — callers do that after releasing the
+ * pvt lock.
  *
- * \note Expects the modem pvt lock to be held.
+ * \note Expects the modem pvt lock to be held; \a modem is the caller's
+ *       grabbed reference (sim_grab_modem), never a bare sim->modem read.
  */
-struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, const char *ext,
+struct ast_channel *modemmanager_new(sim_pvt_t *sim, modem_pvt_t *modem,
+	const char *cid, const char *ext,
 	const char *ctx, int state, const struct ast_assigned_ids *assignedids,
 	const struct ast_channel *requestor);
 

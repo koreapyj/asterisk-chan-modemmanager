@@ -174,8 +174,9 @@ void alsa_autodetect_devices(modem_pvt_t *modem)
 	ast_verb(2, "Modem '%s': autodetected ALSA device '%s'\n", modem->identifier, dev);
 }
 
-static void close_stream_locked(modem_pvt_t *modem)
+static void close_stream(modem_pvt_t *modem)
 {
+	ast_mutex_lock(&modem->pcm_lock);
 	if (modem->capture_pcm) {
 		snd_pcm_close(modem->capture_pcm);
 		modem->capture_pcm = NULL;
@@ -184,45 +185,84 @@ static void close_stream_locked(modem_pvt_t *modem)
 		snd_pcm_close(modem->playback_pcm);
 		modem->playback_pcm = NULL;
 	}
+	ast_mutex_unlock(&modem->pcm_lock);
 }
 
 int open_stream(modem_pvt_t *modem)
 {
 	static const unsigned int rates[] = { 8000, 16000 };
-	const char *in_dev = alsa_pick_device(modem->input_device, modem->detected_device);
-	const char *out_dev = alsa_pick_device(modem->output_device, modem->detected_device);
+	char in_dev[128] = "", out_dev[128] = "";
+	const char *in_pick, *out_pick;
+	snd_pcm_t *capture = NULL, *playback = NULL;
+	unsigned int rate = 0;
 	size_t i;
+	int already;
 
-	if (modem->capture_pcm || modem->playback_pcm) {
+	ast_mutex_lock(&modem->pcm_lock);
+	already = modem->capture_pcm || modem->playback_pcm;
+	ast_mutex_unlock(&modem->pcm_lock);
+	if (already) {
 		return 0;
 	}
 
-	if (!in_dev || !out_dev) {
+	/* Snapshot the device strings under the ao2 lock; the blocking opens
+	 * below run with no locks held. */
+	modemmanager_pvt_lock(modem);
+	in_pick = alsa_pick_device(modem->input_device, modem->detected_device);
+	out_pick = alsa_pick_device(modem->output_device, modem->detected_device);
+	if (in_pick) {
+		ast_copy_string(in_dev, in_pick, sizeof(in_dev));
+	}
+	if (out_pick) {
+		ast_copy_string(out_dev, out_pick, sizeof(out_dev));
+	}
+	modemmanager_pvt_unlock(modem);
+
+	if (ast_strlen_zero(in_dev) || ast_strlen_zero(out_dev)) {
 		ast_log(LOG_ERROR, "No ALSA device for modem '%s' (autodetect failed or "
 			"did not run); set input_device/output_device in modemmanager.conf\n",
 			modem->identifier);
 		return -1;
 	}
 
-	for (i = 0; i < ARRAY_LEN(rates); i++) {
-		if (alsa_open_pcm(&modem->capture_pcm, in_dev, SND_PCM_STREAM_CAPTURE, rates[i])) {
+	for (i = 0; i < ARRAY_LEN(rates) && !rate; i++) {
+		if (alsa_open_pcm(&capture, in_dev, SND_PCM_STREAM_CAPTURE, rates[i])) {
 			continue;
 		}
-		if (alsa_open_pcm(&modem->playback_pcm, out_dev, SND_PCM_STREAM_PLAYBACK, rates[i])) {
-			snd_pcm_close(modem->capture_pcm);
-			modem->capture_pcm = NULL;
+		if (alsa_open_pcm(&playback, out_dev, SND_PCM_STREAM_PLAYBACK, rates[i])) {
+			snd_pcm_close(capture);
+			capture = NULL;
 			continue;
 		}
-		modem->rate = rates[i];
-		modem->format = rates[i] == 16000 ? ast_format_slin16 : ast_format_slin;
-		ast_verb(3, "Opened ALSA capture '%s' / playback '%s' at %u Hz\n",
-			in_dev, out_dev, modem->rate);
-		return 0;
+		rate = rates[i];
 	}
 
-	ast_log(LOG_ERROR, "Unable to open ALSA devices '%s'/'%s' at 8 or 16 kHz for modem '%s'\n",
-		in_dev, out_dev, modem->identifier);
-	return -1;
+	if (!rate) {
+		ast_log(LOG_ERROR, "Unable to open ALSA devices '%s'/'%s' at 8 or 16 kHz for modem '%s'\n",
+			in_dev, out_dev, modem->identifier);
+		return -1;
+	}
+
+	ast_mutex_lock(&modem->pcm_lock);
+	if (modem->capture_pcm || modem->playback_pcm) {
+		/* Lost a race with another opener; theirs wins */
+		ast_mutex_unlock(&modem->pcm_lock);
+		snd_pcm_close(capture);
+		snd_pcm_close(playback);
+		return 0;
+	}
+	modem->capture_pcm = capture;
+	modem->playback_pcm = playback;
+	ast_mutex_unlock(&modem->pcm_lock);
+
+	modemmanager_pvt_lock(modem);
+	modem->rate = rate;
+	modem->format = rate == 16000 ? ast_format_slin16 : ast_format_slin;
+	modemmanager_pvt_unlock(modem);
+
+	ast_verb(3, "Opened ALSA capture '%s' / playback '%s' at %u Hz\n",
+		in_dev, out_dev, rate);
+	return 0;
 }
 
 /*!
@@ -289,6 +329,12 @@ int start_stream(modem_pvt_t *modem)
 {
 	int ret_val = 0;
 
+	/* Blocking device opens run before any lock is taken (idempotent
+	 * when the PCMs are already open from channel creation). */
+	if (open_stream(modem)) {
+		return -1;
+	}
+
 	modemmanager_pvt_lock(modem);
 
 	/* It is possible for a hangup to land before the stream is started;
@@ -298,23 +344,20 @@ int start_stream(modem_pvt_t *modem)
 		goto return_unlock;
 	}
 
-	if (open_stream(modem)) {
+	/* Capture streams do not auto-start from snd_pcm_wait(); without this
+	 * the capture thread would poll forever and no frames would flow.
+	 * snd_pcm_start is a trigger ioctl, not blocking I/O. */
+	ast_mutex_lock(&modem->pcm_lock);
+	if (!modem->capture_pcm
+		|| (snd_pcm_state(modem->capture_pcm) == SND_PCM_STATE_PREPARED
+			&& snd_pcm_start(modem->capture_pcm) < 0)) {
+		ast_mutex_unlock(&modem->pcm_lock);
+		ast_log(LOG_ERROR, "Failed to start ALSA capture for modem '%s'\n",
+			modem->identifier);
 		ret_val = -1;
 		goto return_unlock;
 	}
-
-	/* Capture streams do not auto-start from snd_pcm_wait(); without this
-	 * the capture thread would poll forever and no frames would flow. */
-	if (snd_pcm_state(modem->capture_pcm) == SND_PCM_STATE_PREPARED) {
-		int err = snd_pcm_start(modem->capture_pcm);
-		if (err < 0) {
-			ast_log(LOG_ERROR, "Failed to start ALSA capture for modem '%s': %s\n",
-				modem->identifier, snd_strerror(err));
-			close_stream_locked(modem);
-			ret_val = -1;
-			goto return_unlock;
-		}
-	}
+	ast_mutex_unlock(&modem->pcm_lock);
 
 	modem->stream_stop = 0;
 	ref_modem(modem);
@@ -322,7 +365,6 @@ int start_stream(modem_pvt_t *modem)
 		ast_log(LOG_ERROR, "Failed to create capture thread for modem '%s'\n",
 			modem->identifier);
 		unref_modem(modem);
-		close_stream_locked(modem);
 		ret_val = -1;
 		goto return_unlock;
 	}
@@ -332,6 +374,9 @@ int start_stream(modem_pvt_t *modem)
 return_unlock:
 	modemmanager_pvt_unlock(modem);
 
+	if (ret_val) {
+		close_stream(modem);
+	}
 	return ret_val;
 }
 
@@ -349,16 +394,15 @@ int stop_stream(modem_pvt_t *modem)
 	modemmanager_pvt_unlock(modem);
 
 	/* The capture thread polls with a timeout, so it notices stream_stop
-	 * on its own; no cross-thread snd_pcm calls are needed. */
+	 * on its own; no cross-thread snd_pcm calls are needed. Joining
+	 * happens with no locks held. */
 	if (thread != AST_PTHREADT_NULL) {
 		pthread_join(thread, NULL);
 	}
 
-	modemmanager_pvt_lock(modem);
 	/* PCMs are opened at channel creation, before the stream starts, so
 	 * close them even when the capture thread never ran. */
-	close_stream_locked(modem);
-	modemmanager_pvt_unlock(modem);
+	close_stream(modem);
 
 	return 0;
 }
@@ -367,16 +411,17 @@ int alsa_write_frame(modem_pvt_t *modem, struct ast_frame *frame)
 {
 	snd_pcm_sframes_t n;
 
-	modemmanager_pvt_lock(modem);
-	if (modem->playback_pcm == NULL || !modem->streamstate) {
-		modemmanager_pvt_unlock(modem);
+	/* pcm_lock only: a blocking writei must never stall the ao2 lock */
+	ast_mutex_lock(&modem->pcm_lock);
+	if (modem->playback_pcm == NULL) {
+		ast_mutex_unlock(&modem->pcm_lock);
 		return 0;
 	}
 	n = snd_pcm_writei(modem->playback_pcm, frame->data.ptr, frame->samples);
 	if (n < 0 && !alsa_pcm_recover(modem->playback_pcm, n)) {
 		n = snd_pcm_writei(modem->playback_pcm, frame->data.ptr, frame->samples);
 	}
-	modemmanager_pvt_unlock(modem);
+	ast_mutex_unlock(&modem->pcm_lock);
 	if (n < 0) {
 		ast_log(LOG_WARNING, "ALSA playback failed: %s\n", snd_strerror(n));
 		return -1;

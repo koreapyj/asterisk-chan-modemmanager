@@ -6,4 +6,10 @@
 tests/test_audio_detect
 tests/test_at_tty
 tests/test_mms_codec
+tests/test_mms_fetch
 build/
+debian/.debhelper/
+debian/asterisk-chan-modemmanager/
+debian/asterisk-chan-modemmanager.substvars
+debian/debhelper-build-stamp
+debian/files

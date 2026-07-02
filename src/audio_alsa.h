@@ -25,7 +25,8 @@
 
 /*!
  * \brief Open capture+playback PCMs and set modem->rate/format.
- * \note Expects the pvt lock to be held. Idempotent while open.
+ * \note Takes the locks it needs itself; call with NO pvt lock held
+ *       (device opens block). Idempotent while open.
  * \retval 0 both PCMs open, format chosen
  */
 int open_stream(modem_pvt_t *modem);

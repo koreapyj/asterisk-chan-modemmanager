@@ -66,7 +66,7 @@ void call_detach(modem_pvt_t *modem)
 static int task_call_terminated(void *data)
 {
 	sim_pvt_t *sim = data;
-	modem_pvt_t *modem = sim->modem;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMModemVoice *voice = NULL;
 	char *path = NULL;
 	GError *error = NULL;
@@ -98,6 +98,7 @@ static int task_call_terminated(void *data)
 		g_object_unref(voice);
 	}
 	ast_free(path);
+	unref_modem(modem);
 	unref_sim(sim);
 	return 0;
 }
@@ -106,9 +107,11 @@ static int task_call_terminated(void *data)
 static int task_start_stream(void *data)
 {
 	sim_pvt_t *sim = data;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 
-	if (sim->modem) {
-		start_stream(sim->modem);
+	if (modem) {
+		start_stream(modem);
+		unref_modem(modem);
 	}
 	unref_sim(sim);
 	return 0;
@@ -116,12 +119,16 @@ static int task_start_stream(void *data)
 
 static void push_sim_task(sim_pvt_t *sim, int (*task)(void *))
 {
-	if (!sim->modem || !sim->modem->serializer) {
+	modem_pvt_t *modem = sim_grab_modem(sim);
+
+	if (!modem) {
 		return;
 	}
-	if (ast_taskprocessor_push(sim->modem->serializer, task, ref_sim(sim))) {
+	if (modem->serializer
+		&& ast_taskprocessor_push(modem->serializer, task, ref_sim(sim))) {
 		unref_sim(sim);
 	}
+	unref_modem(modem);
 }
 
 /*!
@@ -134,36 +141,37 @@ static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new
 	MMCallStateReason reason, sim_pvt_t *sim)
 {
 	struct ast_channel *owner;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 
 	ast_debug(1, "Call state changed from %d to %d (reason: %d) on sim %s\n",
 		old, new, reason, sim->identifier);
 
-	if (!sim->modem) {
+	if (!modem) {
 		return;
 	}
 
 	switch (new) {
 	case MM_CALL_STATE_DIALING:
-		if ((owner = modem_grab_owner(sim->modem))) {
+		if ((owner = modem_grab_owner(modem))) {
 			ast_queue_control(owner, AST_CONTROL_PROCEEDING);
 			ast_channel_unref(owner);
 		}
 		break;
 	case MM_CALL_STATE_RINGING_OUT:
-		if ((owner = modem_grab_owner(sim->modem))) {
+		if ((owner = modem_grab_owner(modem))) {
 			ast_queue_control(owner, AST_CONTROL_RINGING);
 			ast_channel_unref(owner);
 		}
 		push_sim_task(sim, task_start_stream);
 		break;
 	case MM_CALL_STATE_ACTIVE:
-		if ((owner = modem_grab_owner(sim->modem))) {
+		if ((owner = modem_grab_owner(modem))) {
 			ast_queue_control(owner, AST_CONTROL_ANSWER);
 			ast_channel_unref(owner);
 		}
 		break;
 	case MM_CALL_STATE_TERMINATED:
-		if ((owner = modem_grab_owner(sim->modem))) {
+		if ((owner = modem_grab_owner(modem))) {
 			ast_queue_hangup(owner);
 			ast_channel_unref(owner);
 		}
@@ -173,6 +181,7 @@ static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new
 		ast_debug(1, "Unhandled call state %d on sim %s\n", new, sim->identifier);
 		break;
 	}
+	unref_modem(modem);
 }
 
 /*!
@@ -188,7 +197,7 @@ static int task_call_added(void *data)
 {
 	struct call_added_task *t = data;
 	sim_pvt_t *sim = t->sim;
-	modem_pvt_t *modem = sim->modem;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMModemVoice *voice = NULL;
 	MMCall *call = NULL;
 	GError *error = NULL;
@@ -237,6 +246,14 @@ static int task_call_added(void *data)
 		ast_verb(3, "Incoming call from %s on sim %s\n",
 			mm_call_get_number(call), sim->identifier);
 
+		/* Blocking device opens must not run under the pvt lock */
+		if (open_stream(modem)) {
+			ast_log(LOG_WARNING, "Rejecting incoming call on modem '%s': no audio\n",
+				modem->identifier);
+			mm_call_hangup_sync(call, NULL, NULL);
+			goto done;
+		}
+
 		modemmanager_pvt_lock(modem);
 		if (modem->owner || modem->call) {
 			modemmanager_pvt_unlock(modem);
@@ -246,13 +263,14 @@ static int task_call_added(void *data)
 			goto done;
 		}
 		call_attach(modem, call, sim);
-		chan = modemmanager_new(sim, mm_call_get_number(call), sim->exten,
+		chan = modemmanager_new(sim, modem, mm_call_get_number(call), sim->exten,
 			sim->context, AST_STATE_RINGING, NULL, NULL);
 		if (!chan) {
 			call_detach(modem);
 			modemmanager_pvt_unlock(modem);
 			ast_log(LOG_WARNING, "Unable to create channel for incoming call\n");
 			mm_call_hangup_sync(call, NULL, NULL);
+			stop_stream(modem);
 			goto done;
 		}
 		modemmanager_pvt_unlock(modem);
@@ -272,6 +290,7 @@ done:
 	if (voice) {
 		g_object_unref(voice);
 	}
+	unref_modem(modem);
 	unref_sim(sim);
 	ast_free(t->path);
 	ast_free(t);
@@ -281,24 +300,31 @@ done:
 void on_voice_call_added(MMModemVoice *voice, const char *path, void *data)
 {
 	sim_pvt_t *sim = data;
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	struct call_added_task *t;
 
 	ast_debug(1, "Call added - %s (sim %s)\n", path, sim->identifier);
 
-	if (!sim->modem || !sim->modem->serializer) {
+	if (!modem) {
+		return;
+	}
+	if (!modem->serializer) {
+		unref_modem(modem);
 		return;
 	}
 
 	t = ast_calloc(1, sizeof(*t));
 	if (!t) {
+		unref_modem(modem);
 		return;
 	}
 	t->sim = ref_sim(sim);
 	t->path = ast_strdup(path);
 
-	if (ast_taskprocessor_push(sim->modem->serializer, task_call_added, t)) {
+	if (ast_taskprocessor_push(modem->serializer, task_call_added, t)) {
 		unref_sim(t->sim);
 		ast_free(t->path);
 		ast_free(t);
 	}
+	unref_modem(modem);
 }

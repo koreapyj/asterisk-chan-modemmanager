@@ -88,6 +88,11 @@ typedef struct modem_pvt {
 	);
 	/*! Current channel for this device */
 	struct ast_channel *owner;
+	/*! Guards the PCM handle pointers and the playback write path, so
+	 *  blocking ALSA I/O never happens under the ao2 lock. The capture
+	 *  thread reads capture_pcm without it: stop_stream() joins the
+	 *  thread before the handles are closed. */
+	ast_mutex_t pcm_lock;
 	/*! ALSA PCM handles for the modem's audio function */
 	snd_pcm_t *capture_pcm;
 	snd_pcm_t *playback_pcm;
@@ -229,6 +234,23 @@ static inline struct ast_channel *modem_grab_owner(modem_pvt_t *modem)
 	chan = modem->owner ? ast_channel_ref(modem->owner) : NULL;
 	modemmanager_pvt_unlock(modem);
 	return chan;
+}
+
+/*!
+ * \brief Snapshot the SIM's modem under the sim lock, taking an ao2 ref.
+ *
+ * sim->modem is reassigned by resolve_object() on reload/hotplug and
+ * cleared at unload; never read it bare outside the sim lock. Release
+ * with unref_modem().
+ */
+static inline modem_pvt_t *sim_grab_modem(sim_pvt_t *sim)
+{
+	modem_pvt_t *modem;
+
+	modemmanager_pvt_lock(sim);
+	modem = ref_modem(sim->modem);
+	modemmanager_pvt_unlock(sim);
+	return modem;
 }
 
 #endif /* CHAN_MM_GLUE_H */

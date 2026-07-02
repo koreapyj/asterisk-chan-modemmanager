@@ -110,7 +110,9 @@ tests/test_mms_codec: tests/test_mms_codec.c src/mms/mms_codec.c src/mms/mms_cod
 # suppressions as the codec test.
 tests/test_mms_fetch: tests/test_mms_fetch.c src/mms/mms_fetch.c src/mms/mms_fetch.h \
 		src/mms/mms_codec.c src/mms/mms_codec.h \
-		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c
+		src/mms/vendor/wsputil.c src/mms/vendor/wsputil.h \
+		src/mms/vendor/mmsutil.c src/mms/vendor/mmsutil.h \
+		src/mms/vendor/vendor_shim.h
 	$(CC) -Wall -Wextra -Wno-unused-parameter -Wno-enum-conversion -std=gnu11 -g -o $@ \
 		tests/test_mms_fetch.c src/mms/mms_fetch.c src/mms/mms_codec.c \
 		src/mms/vendor/wsputil.c src/mms/vendor/mmsutil.c \

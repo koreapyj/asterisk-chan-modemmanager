@@ -93,6 +93,7 @@ static void modem_destructor(void *obj)
 		ast_taskprocessor_unreference(pvt->serializer);
 		pvt->serializer = NULL;
 	}
+	ast_mutex_destroy(&pvt->pcm_lock);
 	ast_string_field_free_memory(pvt);
 }
 
@@ -121,6 +122,7 @@ static void store_config_modem(modem_pvt_t *pvt, const char *var, const char *va
 static int init_modem(modem_pvt_t *pvt, const char *identifier)
 {
 	pvt->thread = AST_PTHREADT_NULL;
+	ast_mutex_init(&pvt->pcm_lock);
 
 	if (ast_string_field_init(pvt, 32)) {
 		return -1;
@@ -218,8 +220,13 @@ static void on_modem_state_changed(MMModem *device, MMModemState old_state,
 	ast_debug(1, "Modem state changed from %d to %d (reason: %d, sim %s)\n",
 		old_state, new_state, reason, sim->identifier);
 
-	if (new_state >= MM_MODEM_STATE_ENABLED && sim->modem) {
-		atinit_kick(sim->modem);
+	if (new_state >= MM_MODEM_STATE_ENABLED) {
+		modem_pvt_t *modem = sim_grab_modem(sim);
+
+		if (modem) {
+			atinit_kick(modem);
+			unref_modem(modem);
+		}
 	}
 }
 
@@ -246,6 +253,14 @@ static void resolve_object(MMObject *obj)
 		goto done;
 	}
 
+	/* A modem that is still initializing (or SIM-locked) may not expose
+	 * its identifiers yet; the object-added/state-changed path retries. */
+	if (!mm_modem_get_device_identifier(mm_modem)) {
+		ast_debug(1, "Skipping %s: no device identifier yet\n",
+			mm_modem_get_path(mm_modem));
+		goto done;
+	}
+
 	modem = find_modem(mm_modem_get_device_identifier(mm_modem));
 	if (!modem) {
 		ast_verb(3, "Modem '%s' at %s is not configured\n",
@@ -260,6 +275,12 @@ static void resolve_object(MMObject *obj)
 		ast_log(LOG_WARNING, "Failed to get SIM of modem '%s' - (%d) %s\n",
 			modem->identifier, error->code, error->message);
 		g_clear_error(&error);
+		goto done;
+	}
+
+	if (!mm_sim_get_identifier(mm_sim)) {
+		ast_debug(1, "Modem '%s': SIM exposes no identifier yet\n",
+			modem->identifier);
 		goto done;
 	}
 

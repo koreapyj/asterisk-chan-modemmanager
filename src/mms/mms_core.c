@@ -94,15 +94,17 @@ struct del_sms_task {
 static int task_delete_sms(void *data)
 {
 	struct del_sms_task *t = data;
+	modem_pvt_t *modem = sim_grab_modem(t->sim);
 	MMModemMessaging *messaging = NULL;
 	GError *error = NULL;
 
-	if (t->sim->modem) {
-		modemmanager_pvt_lock(t->sim->modem);
-		if (t->sim->modem->messaging) {
-			messaging = g_object_ref(t->sim->modem->messaging);
+	if (modem) {
+		modemmanager_pvt_lock(modem);
+		if (modem->messaging) {
+			messaging = g_object_ref(modem->messaging);
 		}
-		modemmanager_pvt_unlock(t->sim->modem);
+		modemmanager_pvt_unlock(modem);
+		unref_modem(modem);
 	}
 	if (messaging) {
 		mm_modem_messaging_delete_sync(messaging, t->path, NULL, &error);
@@ -122,23 +124,33 @@ static int task_delete_sms(void *data)
 
 static void delete_notification_sms(struct mms_txn *txn)
 {
+	modem_pvt_t *modem;
 	struct del_sms_task *t;
 
-	if (ast_strlen_zero(txn->sms_path) || !txn->sim->modem
-		|| !txn->sim->modem->serializer) {
+	if (ast_strlen_zero(txn->sms_path)) {
+		return;
+	}
+	modem = sim_grab_modem(txn->sim);
+	if (!modem) {
+		return;
+	}
+	if (!modem->serializer) {
+		unref_modem(modem);
 		return;
 	}
 	t = ast_calloc(1, sizeof(*t));
 	if (!t) {
+		unref_modem(modem);
 		return;
 	}
 	t->sim = ref_sim(txn->sim);
 	t->path = ast_strdup(txn->sms_path);
-	if (ast_taskprocessor_push(txn->sim->modem->serializer, task_delete_sms, t)) {
+	if (ast_taskprocessor_push(modem->serializer, task_delete_sms, t)) {
 		unref_sim(t->sim);
 		ast_free(t->path);
 		ast_free(t);
 	}
+	unref_modem(modem);
 }
 
 /* --- M-NotifyResp.ind acknowledgment --- */
@@ -268,13 +280,24 @@ static void process_txn(struct mms_txn *txn)
 		goto done;
 	}
 
-	/* Some carriers send a bare path relative to the MMSC base */
-	if (ast_begins_with(txn->location, "http")) {
+	/* Some carriers send a bare path instead of an absolute URL. An
+	 * absolute path ("/x/y") resolves against the MMSC's ORIGIN
+	 * (scheme://host[:port]) — appending it to an MMSC URL that itself
+	 * has a path component would produce a bogus URL — while a relative
+	 * path is appended to the full MMSC base. */
+	if (ast_begins_with(txn->location, "http://")
+		|| ast_begins_with(txn->location, "https://")) {
 		ast_copy_string(url, txn->location, sizeof(url));
+	} else if (txn->location[0] == '/') {
+		const char *authority = strstr(cfg.mmsc, "://");
+		const char *path = authority ? strchr(authority + 3, '/') : NULL;
+		size_t origin_len = path ? (size_t)(path - cfg.mmsc) : strlen(cfg.mmsc);
+
+		snprintf(url, sizeof(url), "%.*s%s", (int)origin_len, cfg.mmsc,
+			txn->location);
 	} else {
 		snprintf(url, sizeof(url), "%s%s%s", cfg.mmsc,
-			ast_ends_with(cfg.mmsc, "/") || txn->location[0] == '/' ? "" : "/",
-			txn->location);
+			ast_ends_with(cfg.mmsc, "/") ? "" : "/", txn->location);
 	}
 
 	params.url = url;

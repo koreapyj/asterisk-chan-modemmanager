@@ -15,6 +15,7 @@
 #include "asterisk/cli.h"
 #include "asterisk/format_cache.h"
 #include "asterisk/logger.h"
+#include "asterisk/module.h"
 #include "asterisk/musiconhold.h"
 #include "asterisk/pbx.h"
 #include "asterisk/stasis_channels.h"
@@ -53,7 +54,8 @@ struct ast_channel_tech modemmanager_tech = {
 	.indicate = modemmanager_indicate,
 };
 
-struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, const char *ext,
+struct ast_channel *modemmanager_new(sim_pvt_t *sim, modem_pvt_t *modem,
+	const char *cid, const char *ext,
 	const char *ctx, int state, const struct ast_assigned_ids *assignedids,
 	const struct ast_channel *requestor)
 {
@@ -65,14 +67,13 @@ struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, const char
 		return NULL;
 	}
 
-	/* Opening the PCMs here (not at stream start) both validates the audio
-	 * device before the call proceeds and determines the channel format
-	 * from the rate that actually opened. */
-	if (open_stream(sim->modem)) {
+	/* Callers already ran open_stream() (with no locks held), which
+	 * validated the audio device and fixed modem->format. */
+	if (!modem->format || modem->format == ast_format_none) {
 		ao2_ref(caps, -1);
 		return NULL;
 	}
-	ast_format_cap_append(caps, sim->modem->format, 0);
+	ast_format_cap_append(caps, modem->format, 0);
 
 	if (!(chan = ast_channel_alloc(1, state, cid, NULL, NULL,
 		ext, ctx, assignedids, requestor, 0, "ModemManager/%s", sim->identifier))) {
@@ -83,23 +84,28 @@ struct ast_channel *modemmanager_new(sim_pvt_t *sim, const char *cid, const char
 	ast_channel_stage_snapshot(chan);
 	ast_channel_tech_set(chan, &modemmanager_tech);
 
-	ast_channel_set_writeformat(chan, sim->modem->format);
-	ast_channel_set_readformat(chan, sim->modem->format);
+	ast_channel_set_writeformat(chan, modem->format);
+	ast_channel_set_readformat(chan, modem->format);
 	ast_channel_nativeformats_set(chan, caps);
 	ao2_ref(caps, -1);
 
 	ast_channel_tech_pvt_set(chan, ref_sim(sim));
 
-	sim->modem->owner = chan;
+	modem->owner = chan;
 
 	if (!ast_strlen_zero(sim->language)) {
 		ast_channel_language_set(chan, sim->language);
 	}
 
-	ast_jb_configure(chan, &sim->modem->jbconf);
+	ast_jb_configure(chan, &modem->jbconf);
 
 	ast_channel_stage_snapshot_done(chan);
 	ast_channel_unlock(chan);
+
+	/* Keep the module loaded while any channel is alive: the loader only
+	 * refuses `module unload` when the usecount is non-zero. Dropped in
+	 * modemmanager_hangup(). */
+	ast_module_ref(AST_MODULE_SELF);
 
 	return chan;
 }
@@ -112,6 +118,9 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 	struct ast_channel *chan = NULL;
 	MMCallProperties *call_props;
 	MMCall *call = NULL;
+	MMModem *device = NULL;
+	MMModemVoice *voice = NULL;
+	modem_pvt_t *modem = NULL;
 	sim_pvt_t *sim;
 	MMModemState device_state;
 
@@ -132,7 +141,14 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 		return NULL;
 	}
 
-	if (!sim->modem || !sim->modem->device || !sim->modem->voice) {
+	modem = sim_grab_modem(sim);
+	if (modem) {
+		modemmanager_pvt_lock(modem);
+		device = modem->device ? g_object_ref(modem->device) : NULL;
+		voice = modem->voice ? g_object_ref(modem->voice) : NULL;
+		modemmanager_pvt_unlock(modem);
+	}
+	if (!modem || !device || !voice) {
 		ast_log(LOG_WARNING, "Sim '%s' has no resolved modem\n", identifier);
 		*cause = AST_CAUSE_CHANNEL_UNACCEPTABLE;
 		goto return_unref;
@@ -146,20 +162,27 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 		goto return_unref;
 	}
 
-	modemmanager_pvt_lock(sim->modem);
-	if (sim->modem->owner) {
-		modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_lock(modem);
+	if (modem->owner) {
+		modemmanager_pvt_unlock(modem);
 		ast_debug(1, "Line is busy\n");
 		*cause = AST_CAUSE_BUSY;
 		goto return_unref;
 	}
-	modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_unlock(modem);
 
-	device_state = mm_modem_get_state(sim->modem->device);
+	device_state = mm_modem_get_state(device);
 	if (device_state < MM_MODEM_STATE_REGISTERED) {
 		ast_log(LOG_WARNING, "Modem '%s' is not registered (state %d)\n",
-			sim->modem->identifier, device_state);
+			modem->identifier, device_state);
 		*cause = AST_CAUSE_FACILITY_NOT_SUBSCRIBED;
+		goto return_unref;
+	}
+
+	/* Validate the audio path (and fix the channel format) before any
+	 * call exists on the modem; blocking opens run with no locks held. */
+	if (open_stream(modem)) {
+		*cause = AST_CAUSE_CHANNEL_UNACCEPTABLE;
 		goto return_unref;
 	}
 
@@ -168,27 +191,29 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 	/* Bind the new MMCall proxy to the module context so its signals
 	 * dispatch on our GMainLoop thread. */
 	mm_bus_push_context();
-	call = mm_modem_voice_create_call_sync(sim->modem->voice, call_props, NULL, &error);
+	call = mm_modem_voice_create_call_sync(voice, call_props, NULL, &error);
 	mm_bus_pop_context();
 	g_object_unref(call_props);
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to create call - (%d) %s\n",
 			error->code, error->message);
 		g_clear_error(&error);
+		stop_stream(modem);
 		goto return_unref;
 	}
 	ast_debug(1, "Call %s created\n", mm_call_get_path(call));
 
-	modemmanager_pvt_lock(sim->modem);
-	call_attach(sim->modem, call, sim);
-	chan = modemmanager_new(sim, NULL, NULL, NULL, AST_STATE_DOWN, assignedids, requestor);
+	modemmanager_pvt_lock(modem);
+	call_attach(modem, call, sim);
+	chan = modemmanager_new(sim, modem, NULL, NULL, NULL, AST_STATE_DOWN, assignedids, requestor);
 	if (!chan) {
-		call_detach(sim->modem);
-		modemmanager_pvt_unlock(sim->modem);
+		call_detach(modem);
+		modemmanager_pvt_unlock(modem);
 		ast_log(LOG_WARNING, "Unable to create new channel\n");
+		stop_stream(modem);
 		goto return_unref;
 	}
-	modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_unlock(modem);
 
 	mm_call_start_sync(call, NULL, &error);
 	if (error) {
@@ -207,6 +232,13 @@ return_unref:
 	if (call) {
 		g_object_unref(call);
 	}
+	if (voice) {
+		g_object_unref(voice);
+	}
+	if (device) {
+		g_object_unref(device);
+	}
+	unref_modem(modem);
 	unref_sim(sim);
 	return chan;
 }
@@ -228,16 +260,18 @@ static int modemmanager_digit_begin(struct ast_channel *c, char digit)
 {
 	sim_pvt_t *sim = ast_channel_tech_pvt(c);
 	const gchar dtmf[2] = { digit, '\0' };
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMCall *call = NULL;
 
-	if (!sim->modem) {
+	if (!modem) {
 		return -1;
 	}
-	modemmanager_pvt_lock(sim->modem);
-	if (sim->modem->call) {
-		call = g_object_ref(sim->modem->call);
+	modemmanager_pvt_lock(modem);
+	if (modem->call) {
+		call = g_object_ref(modem->call);
 	}
-	modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_unlock(modem);
+	unref_modem(modem);
 	if (!call) {
 		return -1;
 	}
@@ -256,19 +290,21 @@ static int modemmanager_hangup(struct ast_channel *c)
 {
 	GError *error = NULL;
 	sim_pvt_t *sim = ast_channel_tech_pvt(c);
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMCall *call = NULL;
 
 	ast_debug(1, "Hanging up %s\n", sim->identifier);
 
-	if (sim->modem) {
-		modemmanager_pvt_lock(sim->modem);
-		sim->modem->owner = NULL;
-		if (sim->modem->call) {
-			call = g_object_ref(sim->modem->call);
+	if (modem) {
+		modemmanager_pvt_lock(modem);
+		modem->owner = NULL;
+		if (modem->call) {
+			call = g_object_ref(modem->call);
 		}
-		modemmanager_pvt_unlock(sim->modem);
+		modemmanager_pvt_unlock(modem);
 
-		stop_stream(sim->modem);
+		stop_stream(modem);
+		unref_modem(modem);
 	}
 
 	if (call) {
@@ -288,6 +324,9 @@ static int modemmanager_hangup(struct ast_channel *c)
 	ast_channel_tech_pvt_set(c, NULL);
 	unref_sim(sim);
 
+	/* Balances the ast_module_ref taken in modemmanager_new() */
+	ast_module_unref(AST_MODULE_SELF);
+
 	return 0;
 }
 
@@ -295,17 +334,19 @@ static int modemmanager_answer(struct ast_channel *c)
 {
 	GError *error = NULL;
 	sim_pvt_t *sim = ast_channel_tech_pvt(c);
+	modem_pvt_t *modem = sim_grab_modem(sim);
 	MMCall *call = NULL;
 
-	if (!sim->modem) {
+	if (!modem) {
 		return -1;
 	}
-	modemmanager_pvt_lock(sim->modem);
-	if (sim->modem->call) {
-		call = g_object_ref(sim->modem->call);
+	modemmanager_pvt_lock(modem);
+	if (modem->call) {
+		call = g_object_ref(modem->call);
 	}
-	modemmanager_pvt_unlock(sim->modem);
+	modemmanager_pvt_unlock(modem);
 	if (!call) {
+		unref_modem(modem);
 		return -1;
 	}
 
@@ -316,12 +357,18 @@ static int modemmanager_answer(struct ast_channel *c)
 			error->code, error->message);
 		g_clear_error(&error);
 		ast_queue_hangup_with_cause(c, AST_CAUSE_FAILURE);
+		unref_modem(modem);
 		return -1;
 	}
 
 	ast_setstate(c, AST_STATE_UP);
 
-	return start_stream(sim->modem);
+	{
+		int res = start_stream(modem);
+
+		unref_modem(modem);
+		return res;
+	}
 }
 
 static struct ast_frame *modemmanager_read(struct ast_channel *chan)
@@ -338,11 +385,14 @@ static int modemmanager_call(struct ast_channel *c, const char *dest, int timeou
 static int modemmanager_write(struct ast_channel *chan, struct ast_frame *frame)
 {
 	sim_pvt_t *sim = ast_channel_tech_pvt(chan);
+	modem_pvt_t *modem;
 
 	switch (frame->frametype) {
 	case AST_FRAME_VOICE:
-		if (sim->modem) {
-			alsa_write_frame(sim->modem, frame);
+		modem = sim_grab_modem(sim);
+		if (modem) {
+			alsa_write_frame(modem, frame);
+			unref_modem(modem);
 		}
 		break;
 	default:
