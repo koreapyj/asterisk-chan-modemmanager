@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkgconf asterisk-dev libmm-glib-dev \
+            libasound2-dev libglib2.0-dev portaudio19-dev
+
+      - name: Build
+        run: make
+
+      - name: Symbol surface checks
+        run: |
+          nm -D chan_modemmanager.so | grep -q __internal_chan_modemmanager_self
+          ldd chan_modemmanager.so | (! grep 'not found')
+
+      - name: Install (DESTDIR)
+        run: |
+          make install DESTDIR="$PWD/destdir"
+          test -f destdir/usr/lib/asterisk/modules/chan_modemmanager.so
+          test -f destdir/etc/asterisk/modemmanager.conf.sample
