@@ -29,6 +29,11 @@ static const int backoff_s[] = { 30, 120, 600 };
 enum txn_state {
 	TXN_WAITING = 0,
 	TXN_FETCHING,
+	/*! Delivered or given up. Kept in the container as a tombstone:
+	 * ModemManager sometimes fails to delete multipart notification SMS,
+	 * and without the tombstone every rescan would re-deliver the same
+	 * message. Swept once the notification expiry (+ grace) passes. */
+	TXN_TERMINAL,
 };
 
 /*!
@@ -223,12 +228,28 @@ static void cfg_snapshot(sim_pvt_t *sim, struct sim_mms_cfg *cfg)
 	modemmanager_pvt_unlock(sim);
 }
 
+/*! \brief Tombstone grace period after expiry (seconds) */
+#define TXN_TOMBSTONE_GRACE (24 * 3600)
+
 static void txn_finish(struct mms_txn *txn, int delete_sms)
 {
 	if (delete_sms) {
 		delete_notification_sms(txn);
 	}
-	ao2_unlink(txns, txn);
+	/* Tombstone rather than unlink: dedupe must keep absorbing rescans
+	 * and carrier re-sends for as long as the notification could recur. */
+	txn->state = TXN_TERMINAL;
+	txn->next_attempt = (txn->expiry ? txn->expiry : time(NULL)) + TXN_TOMBSTONE_GRACE;
+}
+
+static int txn_sweep_cb(void *obj, void *arg, int flags)
+{
+	struct mms_txn *txn = obj;
+
+	if (txn->state == TXN_TERMINAL && time(NULL) >= txn->next_attempt) {
+		return CMP_MATCH;
+	}
+	return 0;
 }
 
 static void txn_retry(struct mms_txn *txn, unsigned int max_retries, const char *why)
@@ -398,7 +419,10 @@ static void *mms_worker(void *unused)
 	ast_mutex_lock(&worker_lock);
 	while (!worker_stop) {
 		time_t wakeup = 0;
-		struct mms_txn *due = pick_due(&wakeup);
+		struct mms_txn *due;
+
+		ao2_callback(txns, OBJ_NODATA | OBJ_MULTIPLE | OBJ_UNLINK, txn_sweep_cb, NULL);
+		due = pick_due(&wakeup);
 
 		if (!due) {
 			if (wakeup) {
