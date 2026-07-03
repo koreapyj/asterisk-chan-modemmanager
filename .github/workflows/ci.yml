@@ -2,11 +2,17 @@ name: CI
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
 
+env:
+  OPENWRT_RELEASE: "25.12.5"
+
 jobs:
-  ubuntu:
-    runs-on: ubuntu-latest
+  # Build + unit tests against the current Ubuntu LTS toolchain.
+  test:
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +23,8 @@ jobs:
             build-essential pkgconf asterisk-dev libmm-glib-dev \
             libasound2-dev libglib2.0-dev libcurl4-openssl-dev
 
-      - name: Build
-        run: make
+      - name: Build (warnings fatal)
+        run: make CFLAGS="-O2 -g -Werror"
 
       - name: Unit tests
         run: make check
@@ -34,44 +40,102 @@ jobs:
           test -f destdir/usr/lib/asterisk/modules/chan_modemmanager.so
           test -f destdir/etc/asterisk/modemmanager.conf.sample
 
-  debian:
-    runs-on: ubuntu-latest
-    container: debian:trixie
+  # .deb packages for the two supported Ubuntu LTS releases. Each build
+  # uses that release's own asterisk-dev, so the package automatically
+  # matches the distro's Asterisk (dh_asterisk pins the ABI hash).
+  # 24.04 ships asterisk 20, 26.04 ships 22 -- together they also cover
+  # the oldest and newest supported Asterisk APIs.
+  # (No Debian job: Debian stable has shipped no asterisk package since
+  # 2023; only sid carries it. See README.)
+  deb:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["24.04", "26.04"]
+    container: ubuntu:${{ matrix.release }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential debhelper pkgconf \
+            build-essential debhelper pkgconf lintian \
             asterisk-dev libmm-glib-dev libasound2-dev \
-            libglib2.0-dev libcurl4-openssl-dev lintian
+            libglib2.0-dev libcurl4-openssl-dev
 
       - name: dpkg-buildpackage
-        run: dpkg-buildpackage -us -uc -b
+        run: |
+          dpkg-buildpackage -us -uc -b
+          mkdir -p dist
+          cp ../asterisk-chan-modemmanager_*.deb dist/
 
       - name: lintian
-        run: lintian ../asterisk-chan-modemmanager_*.deb
+        run: lintian dist/*.deb
 
       - uses: actions/upload-artifact@v4
         with:
-          name: debian-package
-          path: /__w/**/asterisk-chan-modemmanager_*.deb
-          if-no-files-found: warn
+          name: deb-ubuntu-${{ matrix.release }}
+          path: dist/*.deb
+          if-no-files-found: error
 
-  openwrt-sdk:
-    runs-on: ubuntu-latest
-    env:
-      OPENWRT_RELEASE: "25.12.5"
-      OPENWRT_TARGET: x86/64
+  # .apk packages for every OpenWrt package architecture the release
+  # publishes (same coverage as the upstream asterisk package). Each job
+  # uses the release SDK of one representative target per architecture;
+  # the SDK's feeds are pinned by the release, so the build matches the
+  # release's asterisk (23.x) automatically.
+  openwrt:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: aarch64_cortex-a53, target: bcm27xx/bcm2710 }
+          - { arch: aarch64_cortex-a72, target: bcm27xx/bcm2711 }
+          - { arch: aarch64_cortex-a76, target: bcm27xx/bcm2712 }
+          - { arch: aarch64_generic, target: armsr/armv8 }
+          - { arch: arm_arm1176jzf-s_vfp, target: bcm27xx/bcm2708 }
+          - { arch: arm_arm926ej-s, target: at91/sam9x }
+          - { arch: arm_cortex-a15_neon-vfpv4, target: armsr/armv7 }
+          - { arch: arm_cortex-a5_vfpv4, target: at91/sama5 }
+          - { arch: arm_cortex-a7, target: mediatek/mt7629 }
+          - { arch: arm_cortex-a7_neon-vfpv4, target: bcm27xx/bcm2709 }
+          # arm_cortex-a7_vfpv4 (at91/sama7) is excluded: the target has no
+          # AUDIO_SUPPORT, so its feed ships neither alsa-lib nor
+          # kmod-usb-audio and the driver cannot exist there.
+          - { arch: arm_cortex-a8_vfpv3, target: omap/generic }
+          - { arch: arm_cortex-a9, target: bcm53xx/generic }
+          - { arch: arm_cortex-a9_neon, target: imx/cortexa9 }
+          - { arch: arm_cortex-a9_vfpv3-d16, target: mvebu/cortexa9 }
+          - { arch: arm_fa526, target: gemini/generic }
+          - { arch: arm_xscale, target: kirkwood/generic }
+          - { arch: armeb_xscale, target: ixp4xx/generic }
+          - { arch: i386_pentium-mmx, target: x86/geode }
+          - { arch: i386_pentium4, target: x86/generic }
+          - { arch: loongarch64_generic, target: loongarch64/generic }
+          - { arch: mips64_octeonplus, target: octeon/generic }
+          - { arch: mips_24kc, target: ath79/generic }
+          - { arch: mips_mips32, target: bmips/bcm6318 }
+          - { arch: mipsel_24kc, target: ramips/mt7620 }
+          - { arch: mipsel_24kc_24kf, target: pistachio/generic }
+          - { arch: mipsel_74kc, target: bcm47xx/mips74k }
+          - { arch: mipsel_mips32, target: bcm47xx/generic }
+          - { arch: powerpc64_e5500, target: qoriq/generic }
+          - { arch: powerpc_464fp, target: apm821xx/nand }
+          - { arch: powerpc_8548, target: mpc85xx/p1010 }
+          - { arch: riscv64_generic, target: d1/generic }
+          - { arch: x86_64, target: x86/64 }
     steps:
       - uses: actions/checkout@v4
 
       - name: Fetch OpenWrt SDK
         run: |
-          base="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${OPENWRT_TARGET}"
-          sdk=$(curl -fsSL "$base/sha256sums" | grep -o 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.[a-z]*' | head -1)
+          base="https://downloads.openwrt.org/releases/${{ env.OPENWRT_RELEASE }}/targets/${{ matrix.target }}"
+          sdk=$(curl -fsSL "$base/sha256sums" | grep -oE 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.[a-z]+' | head -1)
+          echo "SDK: $sdk"
           curl -fsSL -o sdk.tar "$base/$sdk"
           mkdir sdk && tar --strip-components=1 -xaf sdk.tar -C sdk
 
@@ -82,25 +146,72 @@ jobs:
             sdk/dl
             sdk/build_dir
             sdk/staging_dir/target-*
-          key: openwrt-sdk-${{ env.OPENWRT_RELEASE }}-${{ env.OPENWRT_TARGET }}
+          key: openwrt-${{ env.OPENWRT_RELEASE }}-${{ matrix.arch }}
 
-      - name: Configure feeds
+      # Stock packages on downloads.openwrt.org are built from the feed
+      # commits recorded in the release's feeds.buildinfo (with default
+      # package config, i.e. defconfig). Build from exactly those inputs
+      # instead of trusting the SDK's own feed pins to match.
+      - name: Configure feeds (release feeds.buildinfo)
         run: |
+          base="https://downloads.openwrt.org/releases/${{ env.OPENWRT_RELEASE }}/targets/${{ matrix.target }}"
           cd sdk
-          echo "src-link modemmanager_local $GITHUB_WORKSPACE/contrib/openwrt" >> feeds.conf.default
+          grep '^src-git --root=package base ' feeds.conf.default > feeds.conf
+          curl -fsSL "$base/feeds.buildinfo" >> feeds.conf
+          echo "src-link modemmanager_local $GITHUB_WORKSPACE/contrib/openwrt" >> feeds.conf
+          cat feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install asterisk-chan-modemmanager
           make defconfig
+          # defconfig silently drops packages with unsatisfiable DEPENDS
+          # (the compile then "succeeds" without emitting an .apk) - fail
+          # here with a usable message instead.
+          grep -q '^CONFIG_PACKAGE_asterisk-chan-modemmanager=' .config || {
+            echo "::error::asterisk-chan-modemmanager was deselected by defconfig on ${{ matrix.arch }} - a dependency is unavailable on ${{ matrix.target }}"
+            ./scripts/package-metadata.pl mk tmp/.packageinfo 2>/dev/null | grep -A3 asterisk-chan-modemmanager || true
+            exit 1
+          }
 
       - name: Build package
         run: |
           cd sdk
-          make package/asterisk-chan-modemmanager/compile V=s -j"$(nproc)" \
+          make package/asterisk-chan-modemmanager/compile -j"$(nproc)" \
             ASTERISK_CHAN_MM_SOURCE_URL="file://$GITHUB_WORKSPACE" \
-            ASTERISK_CHAN_MM_SOURCE_VERSION="$GITHUB_SHA"
+            ASTERISK_CHAN_MM_SOURCE_VERSION="$GITHUB_SHA" \
+            || make package/asterisk-chan-modemmanager/compile V=s \
+              ASTERISK_CHAN_MM_SOURCE_URL="file://$GITHUB_WORKSPACE" \
+              ASTERISK_CHAN_MM_SOURCE_VERSION="$GITHUB_SHA"
+          mkdir -p ../dist
+          find bin/packages -path '*modemmanager_local*' -name 'asterisk-chan-modemmanager*.apk' -exec cp {} ../dist/ \;
+          cd ../dist && for f in asterisk-chan-modemmanager*.apk; do
+            mv "$f" "${f%.apk}-${{ matrix.arch }}.apk"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: openwrt-package
-          path: sdk/bin/packages/*/modemmanager_local/asterisk-chan-modemmanager*
-          if-no-files-found: warn
+          name: openwrt-${{ matrix.arch }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+  # Tag push: attach every built package to a GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, deb, openwrt]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist/
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes
