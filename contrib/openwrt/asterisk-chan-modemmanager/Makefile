@@ -16,6 +16,14 @@
 #
 # Release: update PKG_SOURCE_VERSION to the release tag/commit and replace
 # PKG_MIRROR_HASH with the real hash (make package/.../download; make check FIXUP=1).
+#
+# Local-dev gotchas (hard-earned):
+# - The source tarball is cached as dl/$(PKG_NAME)-$(PKG_VERSION).tar.* and
+#   NOT invalidated when the commit changes (hash check skipped). Remove it
+#   before rebuilding a new commit:  rm dl/asterisk-chan-modemmanager-*.tar.*
+# - `apk add` of a package with an unchanged version-release is a no-op on
+#   an already-installed target. Bump PKG_RELEASE, `apk del` first, or copy
+#   the built .so directly while iterating.
 
 include $(TOPDIR)/rules.mk
 

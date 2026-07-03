@@ -96,6 +96,15 @@ See `modemmanager.conf.sample` for all options. Summary:
 - MMS: set `mmsc =` (and usually `mms_proxy`/`mms_interface`) per SIM.
   Bringing up the MMS APN bearer and routing is your responsibility, same
   as it was with mmsd-tng.
+- **IPv6-only carriers with NAT64** (verified on LGU+): the MMSC hostname
+  may publish a native AAAA record that silently drops HTTP — handsets
+  reach it through 464XLAT using the A record instead. Resolve the MMSC's
+  A record and map it through the carrier's NAT64 prefix (discover it per
+  RFC 7050: query AAAA for `ipv4only.arpa` against the bearer's DNS), then
+  pin the result, e.g. in `/etc/hosts`:
+  `2001:db8:64ff::c0a8:e60e  mmsc.example.com`. The notification's
+  Content-Location is fetched as-is, so the pin also covers retrieval
+  URLs that point at a different port than the configured `mmsc`.
 - Init AT commands: `init_commands = AT+QPCMV=1,2` (`;`-separated), optional
   `init_port = /dev/ttyUSBx`.
 
@@ -106,8 +115,11 @@ See `modemmanager.conf.sample` for all options. Summary:
 - `MessageSend(ModemManager:{to_number}@{sim_identifier})`
   - e.g. `MessageSend(ModemManager:+821012345678@8982123456781234567)`
 - Incoming SMS/MMS arrive as MESSAGE in `message_context` (MMS:
-  `mms_context` if set). MMS attachments: `${MMS_ATTACHMENT_COUNT}`,
-  `${MMS_ATTACHMENT_FILE_1}`, `${MMS_ATTACHMENT_TYPE_1}`, …
+  `mms_context` if set). MMS metadata is read with the MESSAGE_DATA
+  function: `${MESSAGE_DATA(MMS_ATTACHMENT_COUNT)}`,
+  `${MESSAGE_DATA(MMS_ATTACHMENT_FILE_1)}`,
+  `${MESSAGE_DATA(MMS_ATTACHMENT_TYPE_1)}`,
+  `${MESSAGE_DATA(MMS_SUBJECT)}`, `${MESSAGE_DATA(MMS_TRANSACTION_ID)}`.
 
 ### CLI
 
