@@ -292,9 +292,16 @@ static void txn_retry(struct mms_txn *txn, unsigned int max_retries, const char 
 	}
 	txn->attempts++;
 	if ((unsigned int)txn->attempts >= max_retries) {
-		ast_log(LOG_WARNING, "[MMS sim=%s txn=%s] giving up after %d attempts (%s)\n",
-			txn->sim->identifier, txn->txn_id, txn->attempts, why);
-		txn_finish(txn, 1);
+		/* Keep the notification SMS unless it has expired: a restart's
+		 * stored-message rescan then retries with a fresh budget instead
+		 * of the message being lost for good (deleting here permanently
+		 * destroyed messages when a broken bearer ate every attempt). */
+		int expired = txn->expiry && time(NULL) > txn->expiry;
+
+		ast_log(LOG_WARNING, "[MMS sim=%s txn=%s] giving up after %d attempts (%s)%s\n",
+			txn->sim->identifier, txn->txn_id, txn->attempts, why,
+			expired ? "" : "; notification kept for rescan recovery");
+		txn_finish(txn, expired);
 		return;
 	}
 	{
