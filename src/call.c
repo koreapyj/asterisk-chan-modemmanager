@@ -32,13 +32,22 @@ static void sim_closure_unref(gpointer data, GClosure *closure)
 
 static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new,
 	MMCallStateReason reason, sim_pvt_t *sim);
+static void on_call_state_notify(GObject *object, GParamSpec *pspec, gpointer data);
 
 void call_attach(modem_pvt_t *modem, MMCall *call, sim_pvt_t *sim)
 {
 	call_detach(modem);
 	modem->call = g_object_ref(call);
+	modem->last_call_state = mm_call_get_state(call);
 	modem->sig_call_state_changed = g_signal_connect_data(call, "state-changed",
 		G_CALLBACK(on_call_state_changed), ref_sim(sim), sim_closure_unref, 0);
+	/* Belt and braces: some proxy/context combinations deliver call state
+	 * only through the property cache (PropertiesChanged -> notify) while
+	 * the explicit StateChanged D-Bus signal never reaches this proxy
+	 * (observed live: MM emitted StateChanged on the bus, the handler
+	 * above stayed silent). Transitions are deduped via last_call_state. */
+	modem->sig_call_notify = g_signal_connect_data(call, "notify::state",
+		G_CALLBACK(on_call_state_notify), ref_sim(sim), sim_closure_unref, 0);
 	modem->sig_call_dtmf = g_signal_connect_data(call, "dtmf-received",
 		G_CALLBACK(on_call_dtmf_received), ref_sim(sim), sim_closure_unref, 0);
 }
@@ -51,6 +60,10 @@ void call_detach(modem_pvt_t *modem)
 	if (modem->sig_call_state_changed) {
 		g_signal_handler_disconnect(modem->call, modem->sig_call_state_changed);
 		modem->sig_call_state_changed = 0;
+	}
+	if (modem->sig_call_notify) {
+		g_signal_handler_disconnect(modem->call, modem->sig_call_notify);
+		modem->sig_call_notify = 0;
 	}
 	if (modem->sig_call_dtmf) {
 		g_signal_handler_disconnect(modem->call, modem->sig_call_dtmf);
@@ -137,18 +150,33 @@ static void push_sim_task(sim_pvt_t *sim, int (*task)(void *))
  * Only queues channel indications and pushes blocking work (D-Bus calls,
  * ALSA opens) onto the modem serializer.
  */
-static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new,
-	MMCallStateReason reason, sim_pvt_t *sim)
+/*!
+ * \brief Common call-state transition logic; runs on the GMainLoop thread.
+ *
+ * Reached from both the StateChanged D-Bus signal and the property-cache
+ * notify::state path; last_call_state dedupes double delivery.
+ */
+static void handle_call_state(MMCall *call, MMCallState new, MMCallStateReason reason,
+	sim_pvt_t *sim)
 {
 	struct ast_channel *owner;
 	modem_pvt_t *modem = sim_grab_modem(sim);
 
-	ast_debug(1, "Call state changed from %d to %d (reason: %d) on sim %s\n",
-		old, new, reason, sim->identifier);
-
 	if (!modem) {
 		return;
 	}
+
+	modemmanager_pvt_lock(modem);
+	if (modem->call != call || modem->last_call_state == (int)new) {
+		modemmanager_pvt_unlock(modem);
+		unref_modem(modem);
+		return;
+	}
+	modem->last_call_state = new;
+	modemmanager_pvt_unlock(modem);
+
+	ast_debug(1, "Call state now %d (reason: %d) on sim %s\n",
+		new, reason, sim->identifier);
 
 	switch (new) {
 	case MM_CALL_STATE_DIALING:
@@ -182,6 +210,22 @@ static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new
 		break;
 	}
 	unref_modem(modem);
+}
+
+static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new,
+	MMCallStateReason reason, sim_pvt_t *sim)
+{
+	ast_debug(1, "StateChanged signal %d -> %d on sim %s\n", old, new, sim->identifier);
+	handle_call_state(call, new, reason, sim);
+}
+
+static void on_call_state_notify(GObject *object, GParamSpec *pspec, gpointer data)
+{
+	MMCall *call = MM_CALL(object);
+	sim_pvt_t *sim = data;
+
+	handle_call_state(call, mm_call_get_state(call),
+		mm_call_get_state_reason(call), sim);
 }
 
 /*!
