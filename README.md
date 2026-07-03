@@ -1,140 +1,203 @@
 # asterisk-chan-modemmanager
 
-Asterisk channel driver for [ModemManager](https://modemmanager.org/).
+Turn a USB cellular modem into a phone line for [Asterisk](https://www.asterisk.org/).
 
-## Features
-- Phone calls (voice over the modem's USB audio function, ALSA-direct)
-- SMS send/receive
-- **MMS receive, natively** — no mmsd-tng daemon: WAP-push notifications are
-  decoded in-driver and the message is fetched from your carrier's MMSC over
-  HTTP (libcurl). Text parts are delivered to the dialplan message context;
-  other attachments are spooled to disk and referenced through
-  `MMS_ATTACHMENT_*` message variables.
-- **Automatic audio device detection** — the modem's USB sysfs path is
-  correlated with the ALSA card of its USB audio function, so
-  `input_device`/`output_device` normally need no configuration (`auto`).
-- **Per-modem init AT commands** — e.g. Quectel modems need `AT+QPCMV=1,2`
-  after every boot before call audio flows; configure
-  `init_commands = AT+QPCMV=1,2` and the driver sends it once per modem
-  appearance over a spare AT port (ModemManager keeps its own ports; see
-  `modemmanager.conf.sample`).
+This channel driver connects Asterisk to modems managed by
+[ModemManager](https://modemmanager.org/) and gives you:
 
-## Requirements
-- Asterisk 20–23 headers (`asterisk-dev` on Debian/Ubuntu)
-- glib-2.0 / gio-2.0 / gobject-2.0
-- libmm-glib (ModemManager ≥ 1.20 recommended)
-- alsa-lib
-- libcurl
+- **Voice calls** (incoming and outgoing) over the modem's USB audio function
+- **SMS** send and receive
+- **MMS receive** — handled natively in the driver, no mmsd-tng daemon needed;
+  attachments are saved to disk and exposed to the dialplan
+- **Automatic audio device detection** — the driver finds the modem's ALSA
+  sound card by itself; no audio configuration needed in the common case
+- **Per-modem init AT commands** — for modems that need a setup command after
+  every boot (e.g. Quectel `AT+QPCMV=1,2` to enable USB voice audio)
 
-Modem requirements:
-- Voice call support exposed through ModemManager (many modems do not
-  support voice).
-- Call audio reachable as an ALSA device (USB audio class). tty audio is not
-  supported.
+Everything works with **stock distribution packages**: no rebuilds of
+Asterisk, ModemManager, or any other package are required, and no non-default
+build options anywhere.
 
-## Building
+Developing or packaging? See [DEV_README.md](DEV_README.md).
+
+## Install
+
+Prebuilt packages for every release are attached to
+[GitHub Releases](https://github.com/koreapyj/asterisk-chan-modemmanager/releases).
+
+### OpenWrt 25.12
+
+Download the `.apk` matching your package architecture (shown by
+`apk info --print-arch` or in your firmware's profile), then:
 
 ```sh
-make            # builds chan_modemmanager.so via pkg-config
-make check      # host unit tests (no Asterisk needed)
-sudo make install
+apk add --allow-untrusted ./asterisk-chan-modemmanager-*.apk
 ```
 
-Overridable variables: `CC`, `PKG_CONFIG`, `ASTERISK_INCLUDE` (default
-`/usr/include`), `MODULES_DIR` (default `/usr/lib/asterisk/modules`),
-`ASTETCDIR`, `DESTDIR`.
+Dependencies (asterisk, ModemManager, ALSA, the required asterisk bridge and
+codec modules, and `kmod-usb-audio`) are installed automatically when the
+package feeds are configured.
 
-### Debian/Ubuntu package
+One-time setup — Asterisk runs as the `asterisk` user, which needs access to
+the modem's sound card and (optionally) an AT port:
 
 ```sh
-dpkg-buildpackage -us -uc -b
+# add 'asterisk' to the audio and dialout groups in /etc/group:
+sed -i -e 's/^audio:.*/&,asterisk/' -e 's/^dialout:.*/&,asterisk/' /etc/group
+service asterisk restart
 ```
 
-Produces `asterisk-chan-modemmanager_*.deb` with the correct
-`asterisk-abi-*` dependency and multiarch module path.
+If you use `init_commands` and ModemManager holds every AT port of your modem,
+free one with an ignore rule (ModemManager parses `/lib/udev/rules.d` itself
+on OpenWrt, no udev needed). Example for a Quectel RM500Q (USB interface 03 =
+second AT port):
 
-### OpenWrt package
+```
+# /lib/udev/rules.d/78-mm-chan-modemmanager-init-port.rules
+ACTION!="add|change|move|bind", GOTO="end"
+SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="?*", ENV{.MM_USBIFNUM}="$attr{bInterfaceNumber}"
+ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0800", ENV{.MM_USBIFNUM}=="03", SUBSYSTEM=="tty", ENV{ID_MM_PORT_IGNORE}="1"
+LABEL="end"
+```
 
-An OpenWrt package lives in `contrib/openwrt/asterisk-chan-modemmanager/`
-(built against OpenWrt 25.12 and the matching `telephony`/`packages`
-feeds; 25.12 uses APK as its package manager, so the build produces
-`.apk` packages installed with `apk add`). Point a feed at it:
+Then set `init_port = /dev/ttyUSBx` (the ignored port) in the config and
+restart ModemManager.
+
+### Ubuntu 24.04 / 26.04
+
+Download the `.deb` built for **your** Ubuntu release (the package is pinned
+to that release's Asterisk ABI — a 24.04 package will not install on 26.04
+and vice versa), then:
 
 ```sh
-echo 'src-link modemmanager_local /path/to/this/repo/contrib/openwrt' >> feeds.conf
-./scripts/feeds update modemmanager_local
-./scripts/feeds install asterisk-chan-modemmanager
-make menuconfig   # Network -> Telephony -> asterisk-chan-modemmanager
+sudo apt install ./asterisk-chan-modemmanager_*.deb
 ```
 
-OpenWrt deployment notes (verified on 25.12.5):
-- Asterisk runs as the `asterisk` user: add it to the `audio` group (call
-  audio via `/dev/snd`) and `dialout` (init AT commands) in `/etc/group`,
-  then restart asterisk.
-- ModemManager may hold every AT port (on a QMI-controlled RM500Q it keeps
-  both). To use `init_commands`, free one port with an
-  `ID_MM_PORT_IGNORE` rule — MM parses `/lib/udev/rules.d` itself on
-  OpenWrt even without udev — and point `init_port` at it, e.g.:
+This pulls in Asterisk and all libraries automatically. Add the `asterisk`
+user to the `audio` and `dialout` groups if it isn't already:
 
-  ```
-  # /lib/udev/rules.d/78-mm-chan-modemmanager-init-port.rules
-  ACTION!="add|change|move|bind", GOTO="end"
-  SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="?*", ENV{.MM_USBIFNUM}="$attr{bInterfaceNumber}"
-  ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0800", ENV{.MM_USBIFNUM}=="03", SUBSYSTEM=="tty", ENV{ID_MM_PORT_IGNORE}="1"
-  LABEL="end"
-  ```
+```sh
+sudo usermod -aG audio,dialout asterisk
+sudo systemctl restart asterisk
+```
 
-## Configuration
+### Debian
 
-See `modemmanager.conf.sample` for all options. Summary:
+Debian stable has not shipped an Asterisk package since 2023 (only sid
+carries one), so there is no prebuilt Debian package. On sid you can build
+your own with `dpkg-buildpackage -us -uc -b` (see
+[DEV_README.md](DEV_README.md)).
 
-- `[modemN] type=modem` sections are matched by ModemManager
-  `DeviceIdentifier`; `[simN] type=sim` sections by `SimIdentifier` (ICCID).
-  SIMs are located dynamically among the configured modems at load.
-- Audio: `input_device`/`output_device` default to `auto`. Explicit values
-  are ALSA PCM names (changed from PortAudio names in older versions).
-- MMS: set `mmsc =` (and usually `mms_proxy`/`mms_interface`) per SIM.
-  Bringing up the MMS APN bearer and routing is your responsibility, same
-  as it was with mmsd-tng.
-- **IPv6-only carriers with NAT64** (verified on LGU+): the MMSC hostname
-  may publish a native AAAA record that silently drops HTTP — handsets
-  reach it through 464XLAT using the A record instead. Resolve the MMSC's
-  A record and map it through the carrier's NAT64 prefix (discover it per
-  RFC 7050: query AAAA for `ipv4only.arpa` against the bearer's DNS), then
-  pin the result, e.g. in `/etc/hosts`:
-  `2001:db8:64ff::c0a8:e60e  mmsc.example.com`. The notification's
-  Content-Location is fetched as-is, so the pin also covers retrieval
-  URLs that point at a different port than the configured `mmsc`.
-- Init AT commands: `init_commands = AT+QPCMV=1,2` (`;`-separated), optional
-  `init_port = /dev/ttyUSBx`.
+## Configure
 
-### Dialplan
+Config file: `/etc/asterisk/modemmanager.conf` (the full annotated reference
+is `modemmanager.conf.sample`). You declare your modem(s) and SIM(s); the
+driver matches them to live hardware dynamically, so replugging or swapping
+slots keeps working.
 
-- `Dial(ModemManager/{SimIdentifier}/{Number})`
-  - e.g. `Dial(ModemManager/8982123456781234567/+821012345678,,r)`
-- `MessageSend(ModemManager:{to_number}@{sim_identifier})`
-  - e.g. `MessageSend(ModemManager:+821012345678@8982123456781234567)`
-- Incoming SMS/MMS arrive as MESSAGE in `message_context` (MMS:
-  `mms_context` if set). MMS metadata is read with the MESSAGE_DATA
-  function: `${MESSAGE_DATA(MMS_ATTACHMENT_COUNT)}`,
-  `${MESSAGE_DATA(MMS_ATTACHMENT_FILE_1)}`,
-  `${MESSAGE_DATA(MMS_ATTACHMENT_TYPE_1)}`,
-  `${MESSAGE_DATA(MMS_SUBJECT)}`, `${MESSAGE_DATA(MMS_TRANSACTION_ID)}`.
+Find your identifiers with `mmcli`:
 
-### CLI
+```sh
+mmcli -L                 # list modems
+mmcli -m 0 | grep device # DeviceIdentifier  -> [modem] identifier
+mmcli -m 0 --sim 0       # ICCID             -> [sim] identifier
+```
 
-- `modemmanager list available` — modems, SIMs and ALSA PCM devices.
+Minimal working example:
 
-## Architecture notes
+```ini
+[modem1]
+type = modem
+identifier = 0123456789abcdef0123456789abcdef01234567 ; mmcli DeviceIdentifier
+; audio devices default to auto-detection; set explicitly only if that fails:
+;input_device = plughw:CARD=Device,DEV=0
+;output_device = plughw:CARD=Device,DEV=0
+; Quectel modems need this after every boot for USB voice audio:
+init_commands = AT+QPCMV=1,2
+;init_port = /dev/ttyUSB3   ; optional: pin the AT port used for init_commands
 
-- One module, `chan_modemmanager.so`. GLib runs on a private GMainContext
-  in a dedicated thread; blocking work runs on per-modem serializers over a
-  shared threadpool; MMS fetches run on their own worker. See
-  `src/mm_glue.h` for the threading/ownership rules.
-- `src/mms/vendor/` contains the WSP/MMS codec vendored from GPL-2
-  [mmsd-tng](https://gitlab.com/kop316/mmsd) (provenance headers in each
-  file).
+[sim1]
+type = sim
+identifier = 8982123456781234567    ; ICCID
+context = from-mobile               ; incoming calls land here
+message_context = from-mobile-sms   ; incoming SMS/MMS land here
+exten = s
+```
 
-## Tested environment
-- Ubuntu 24.04+ (asterisk 20–22), OpenWrt 25.12 (asterisk 23)
-- Quectel RM500Q, EM05, EC25 on UMTS(CS) and VoLTE/5G(PS)
+### MMS
+
+Set your carrier's MMSC per SIM. Bringing up the MMS APN bearer/routing is
+your responsibility (same as with mmsd-tng):
+
+```ini
+[sim1]
+; ...
+mmsc = http://mms.example.com:9084
+mms_interface = wwan0     ; bind fetches to the MMS bearer's netdev
+;mms_proxy = 10.0.0.1:8080
+;mms_spool = /var/spool/asterisk/mms
+```
+
+**IPv6-only carriers with NAT64** (verified on LGU+): some MMSCs publish a
+native AAAA record that silently drops HTTP — real handsets reach them via
+the IPv4 A record through 464XLAT/NAT64. If MMS fetches time out on an
+IPv6-only bearer:
+
+1. Discover the NAT64 prefix (RFC 7050): query `AAAA ipv4only.arpa` against
+   the bearer's DNS server.
+2. Resolve the MMSC's **A** record, map it into the prefix, and pin it in
+   `/etc/hosts`, e.g. `2001:db8:64ff::c0a8:e60e  mms.example.com`.
+
+The pin also covers retrieval URLs on other ports of the same host.
+
+## Use
+
+Dialplan:
+
+```
+; Outgoing call through the SIM
+exten => _X.,1,Dial(ModemManager/8982123456781234567/${EXTEN},30)
+
+; Outgoing SMS
+same => n,MessageSend(ModemManager:+821012345678@8982123456781234567)
+
+; Incoming calls arrive in the SIM's `context`; SMS/MMS arrive as MESSAGE
+; in `message_context` (MMS: `mms_context` if set). MMS metadata:
+[from-mobile-sms]
+exten => s,1,Verbose(1,SMS from ${MESSAGE(from)}: ${MESSAGE(body)})
+ same => n,Verbose(1,MMS attachments: ${MESSAGE_DATA(MMS_ATTACHMENT_COUNT)})
+ same => n,Verbose(1,First file: ${MESSAGE_DATA(MMS_ATTACHMENT_FILE_1)} (${MESSAGE_DATA(MMS_ATTACHMENT_TYPE_1)}))
+ same => n,Verbose(1,Subject: ${MESSAGE_DATA(MMS_SUBJECT)})
+```
+
+CLI: `modemmanager list available` shows detected modems, SIMs and ALSA
+devices.
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| Call connects but no audio | `asterisk` user not in `audio` group; on OpenWrt `kmod-usb-audio` missing; on Quectel `AT+QPCMV=1,2` not applied (set `init_commands` — it resets on every modem boot) |
+| "No translator path" / "Could not create class basic" (OpenWrt) | Missing asterisk codec/bridge packages — installed automatically by this package's dependencies since 1.0.0; `apk fix` or reinstall |
+| `init_commands` never sent / port busy | ModemManager holds all AT ports. Add the `ID_MM_PORT_IGNORE` rule above and set `init_port` |
+| MMS notification arrives but fetch fails | Is the MMS APN bearer up and routed? On IPv6-only bearers, apply the NAT64 pin above |
+| SMS/call sending rejected while registered fine | Usually carrier-side provisioning of the SIM (e.g. data-only SIM); test the SIM in a phone |
+| Wrong ALSA device picked | Set `input_device`/`output_device` explicitly; candidates are listed by `modemmanager list available` |
+
+## Compatibility
+
+- **Asterisk**: 20 – 23
+- **Distributions**: OpenWrt 25.12, Ubuntu 24.04 / 26.04 (Debian sid: build
+  from source). On OpenWrt the package exists for every architecture whose
+  kernel has sound support — a few audio-less targets (e.g. at91/sama7)
+  cannot run it and have no package.
+- **Modems**: voice support must be exposed through ModemManager and call
+  audio must be reachable as a USB audio class ALSA device (tty audio is not
+  supported). Tested: Quectel RM500Q, EM05, EC25 on UMTS(CS) and VoLTE/5G(PS).
+- **Carriers**: tested on LGU+ (Korea) including VoLTE, SMS, MMS over an
+  IPv6-only bearer with NAT64.
+
+## License
+
+GPL-2.0-only. `src/mms/vendor/` contains the WSP/MMS codec vendored from
+[mmsd-tng](https://gitlab.com/kop316/mmsd) (GPL-2).
