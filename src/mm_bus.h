@@ -67,4 +67,14 @@ struct ast_threadpool *mm_bus_threadpool(void);
  */
 GMainContext *mm_bus_context(void);
 
+/*!
+ * \brief Run \a fn once on the GMainLoop thread after \a interval_ms.
+ *
+ * Safe from any thread (g_source_attach is thread-safe; no
+ * push_thread_default involved). \a fn must return G_SOURCE_REMOVE and
+ * consume \a data. If the loop stops before the timer fires, \a fn never
+ * runs and \a data leaks -- keep intervals short and payloads small.
+ */
+guint mm_bus_timeout_add(guint interval_ms, GSourceFunc fn, gpointer data);
+
 #endif /* CHAN_MM_BUS_H */

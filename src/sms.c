@@ -114,8 +114,10 @@ const struct ast_msg_tech mm_msg_tech = {
 
 /*!
  * \brief Deliver one received text SMS to the Asterisk message bus.
+ * \retval 0 queued to the dialplan (safe to delete from the modem)
+ * \retval -1 not delivered (leave it stored)
  */
-static void deliver_text_sms(sim_pvt_t *sim, MMSms *message)
+static int deliver_text_sms(sim_pvt_t *sim, MMSms *message)
 {
 	struct ast_msg *msg;
 	int res = 0;
@@ -126,7 +128,7 @@ static void deliver_text_sms(sim_pvt_t *sim, MMSms *message)
 	msg = ast_msg_alloc();
 	if (!msg) {
 		ast_log(LOG_WARNING, "Failed to allocate message\n");
-		return;
+		return -1;
 	}
 	res |= ast_msg_set_context(msg, "%s", S_OR(sim->message_context, sim->context));
 	res |= ast_msg_set_exten(msg, "%s", S_OR(sim->exten, ""));
@@ -138,7 +140,7 @@ static void deliver_text_sms(sim_pvt_t *sim, MMSms *message)
 	if (res) {
 		ast_log(LOG_WARNING, "Failed to build message\n");
 		ast_msg_destroy(msg);
-		return;
+		return -1;
 	}
 
 	if (!ast_msg_has_destination(msg)) {
@@ -146,15 +148,49 @@ static void deliver_text_sms(sim_pvt_t *sim, MMSms *message)
 			"(context '%s', exten '%s')\n",
 			S_OR(sim->message_context, sim->context), S_OR(sim->exten, ""));
 		ast_msg_destroy(msg);
-		return;
+		return -1;
 	}
 	ast_msg_queue(msg);
+	return 0;
 }
 
 struct message_added_task {
 	sim_pvt_t *sim;
 	char *path;
+	int rechecks;
 };
+
+/* MM emits Messaging.Added when it creates the SMS object, which can be
+ * before all parts are read off the modem (state 'receiving'); the flip
+ * to 'received' is only a property change with no second Added. Poll a
+ * few times before giving up (observed live: WAP-push notifications
+ * arriving during an active voice call stay 'receiving' for a while
+ * because the QMI channel is busy). */
+#define SMS_RECHECK_INTERVAL_MS 2000
+#define SMS_RECHECK_MAX 15
+
+static void message_added_task_free(struct message_added_task *t)
+{
+	unref_sim(t->sim);
+	ast_free(t->path);
+	ast_free(t);
+}
+
+static int task_message_added(void *data);
+
+/*! \brief Timer callback (GMainLoop thread): re-run the serializer task */
+static gboolean recheck_message_cb(gpointer data)
+{
+	struct message_added_task *t = data;
+	modem_pvt_t *modem = sim_grab_modem(t->sim);
+
+	if (!modem || !modem->serializer
+		|| ast_taskprocessor_push(modem->serializer, task_message_added, t)) {
+		message_added_task_free(t);
+	}
+	unref_modem(modem);
+	return G_SOURCE_REMOVE;
+}
 
 static int task_message_added(void *data)
 {
@@ -165,6 +201,7 @@ static int task_message_added(void *data)
 	MMSms *message = NULL;
 	GError *error = NULL;
 	GList *messages, *l;
+	MMSmsState state;
 
 	if (!modem) {
 		goto done;
@@ -197,13 +234,34 @@ static int task_message_added(void *data)
 		goto done;
 	}
 
-	if (mm_sms_get_state(message) == MM_SMS_STATE_RECEIVED) {
+	state = mm_sms_get_state(message);
+	if (state == MM_SMS_STATE_RECEIVING) {
+		if (t->rechecks < SMS_RECHECK_MAX) {
+			t->rechecks++;
+			ast_debug(1, "Message %s still receiving; recheck %d/%d in %dms\n",
+				t->path, t->rechecks, SMS_RECHECK_MAX, SMS_RECHECK_INTERVAL_MS);
+			mm_bus_timeout_add(SMS_RECHECK_INTERVAL_MS, recheck_message_cb, t);
+			t = NULL; /* ownership handed to the timer */
+		} else {
+			ast_log(LOG_WARNING, "Message %s stuck in receiving state; giving up "
+				"(a stored-message rescan will retry it)\n", t->path);
+		}
+	} else if (state == MM_SMS_STATE_RECEIVED) {
 		/* libmm-glib reports textless (binary) SMS as an EMPTY string,
 		 * not NULL; "(null)" covers older ModemManager quirks. */
 		const char *text = mm_sms_get_text(message);
 
 		if (!ast_strlen_zero(text) && strcmp(text, "(null)")) {
-			deliver_text_sms(sim, message);
+			if (!deliver_text_sms(sim, message)) {
+				/* Delivered: delete it, or storage fills up and the
+				 * modem eventually rejects new SMS. */
+				mm_modem_messaging_delete_sync(messaging, t->path, NULL, &error);
+				if (error) {
+					ast_log(LOG_WARNING, "Failed to delete delivered SMS %s - (%d) %s\n",
+						t->path, error->code, error->message);
+					g_clear_error(&error);
+				}
+			}
 		} else {
 			/* Binary payload: WAP push carrying an MMS notification */
 			gsize data_len = 0;
@@ -216,6 +274,8 @@ static int task_message_added(void *data)
 				ast_debug(1, "Received SMS %s has neither text nor data\n", t->path);
 			}
 		}
+	} else {
+		ast_debug(1, "Added message %s in state %d; ignoring\n", t->path, state);
 	}
 
 done:
@@ -226,9 +286,11 @@ done:
 		g_object_unref(messaging);
 	}
 	unref_modem(modem);
-	unref_sim(sim);
-	ast_free(t->path);
-	ast_free(t);
+	if (t) {
+		message_added_task_free(t);
+	} else {
+		/* sim ref travels with the rescheduled task */
+	}
 	return 0;
 }
 

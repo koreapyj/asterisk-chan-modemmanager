@@ -54,4 +54,14 @@ void mms_shutdown(void);
 void mms_on_wap_push_sms(sim_pvt_t *sim, const guint8 *data, gsize len,
 	const char *orig_number, const char *sms_path);
 
+/*!
+ * \brief Make all waiting transactions due now and wake the worker.
+ *
+ * Called on voice-call termination: fetch failures during a call don't
+ * count against the retry budget (the MMS bearer may share the call's
+ * PDN), so this retries them immediately instead of after the backoff.
+ * Cheap and safe from any thread; no-op when the subsystem is down.
+ */
+void mms_kick(void);
+
 #endif /* CHAN_MM_MMS_H */

@@ -42,6 +42,17 @@ GMainContext *mm_bus_context(void)
 	return bus_context;
 }
 
+guint mm_bus_timeout_add(guint interval_ms, GSourceFunc fn, gpointer data)
+{
+	GSource *src = g_timeout_source_new(interval_ms);
+	guint id;
+
+	g_source_set_callback(src, fn, data, NULL);
+	id = g_source_attach(src, bus_context);
+	g_source_unref(src);
+	return id;
+}
+
 static void *bus_thread_fn(void *data)
 {
 	g_main_context_push_thread_default(bus_context);

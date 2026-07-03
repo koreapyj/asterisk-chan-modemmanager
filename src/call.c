@@ -19,6 +19,7 @@
 #include "call.h"
 #include "channel.h"
 #include "mm_bus.h"
+#include "mms/mms.h"
 
 static void on_call_dtmf_received(MMCall *call, char *dtmf, sim_pvt_t *sim)
 {
@@ -218,6 +219,10 @@ static int task_call_terminated(void *data)
 	ast_free(path);
 	unref_modem(modem);
 	unref_sim(sim);
+
+	/* MMS fetch failures during the call didn't count against their
+	 * retry budget; make them due again now that the call is gone. */
+	mms_kick();
 	return 0;
 }
 

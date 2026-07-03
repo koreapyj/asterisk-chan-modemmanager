@@ -252,8 +252,44 @@ static int txn_sweep_cb(void *obj, void *arg, int flags)
 	return 0;
 }
 
+/*!
+ * \brief Is a voice call active on the modem currently backing \a sim?
+ *
+ * With a correctly configured MMS bearer (its own data APN, e.g. LGU+
+ * internet.lguplus.co.kr) fetches work fine during calls. But when the
+ * bearer shares the modem's IMS PDN (misconfiguration, or carriers where
+ * MMS really rides the ims APN), the modem flow-controls that PDN's
+ * host data path for the whole call: sends fail locally or time out
+ * until hangup (measured on an RM500Q). Fetch attempts are still made
+ * during calls -- but failures then don't burn retry budget, and call
+ * termination kicks the worker (mms_kick) so the message lands right
+ * after hangup instead of a backoff period later.
+ */
+static int sim_call_active(sim_pvt_t *sim)
+{
+	modem_pvt_t *modem = sim_grab_modem(sim);
+	int active = 0;
+
+	if (modem) {
+		modemmanager_pvt_lock(modem);
+		active = modem->call != NULL;
+		modemmanager_pvt_unlock(modem);
+		unref_modem(modem);
+	}
+	return active;
+}
+
+#define TXN_CALL_RETRY_S 15
+
 static void txn_retry(struct mms_txn *txn, unsigned int max_retries, const char *why)
 {
+	if (sim_call_active(txn->sim)) {
+		txn->state = TXN_WAITING;
+		txn->next_attempt = time(NULL) + TXN_CALL_RETRY_S;
+		ast_debug(1, "[MMS sim=%s txn=%s] failed during a voice call; not counting "
+			"the attempt (%s)\n", txn->sim->identifier, txn->txn_id, why);
+		return;
+	}
 	txn->attempts++;
 	if ((unsigned int)txn->attempts >= max_retries) {
 		ast_log(LOG_WARNING, "[MMS sim=%s txn=%s] giving up after %d attempts (%s)\n",
@@ -412,6 +448,27 @@ static struct mms_txn *pick_due(time_t *wakeup)
 	}
 	ao2_iterator_destroy(&it);
 	return due;
+}
+
+static int txn_kick_cb(void *obj, void *arg, int flags)
+{
+	struct mms_txn *txn = obj;
+
+	if (txn->state == TXN_WAITING) {
+		txn->next_attempt = time(NULL);
+	}
+	return 0;
+}
+
+void mms_kick(void)
+{
+	if (!txns) {
+		return;
+	}
+	ao2_callback(txns, OBJ_NODATA | OBJ_MULTIPLE, txn_kick_cb, NULL);
+	ast_mutex_lock(&worker_lock);
+	ast_cond_signal(&worker_cond);
+	ast_mutex_unlock(&worker_lock);
 }
 
 static void *mms_worker(void *unused)
