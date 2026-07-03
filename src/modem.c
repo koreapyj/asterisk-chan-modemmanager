@@ -138,17 +138,29 @@ static int init_modem(modem_pvt_t *pvt, const char *identifier)
 void build_modem(struct ast_config *cfg, const char *name)
 {
 	struct ast_variable *v;
+	const char *identifier = ast_variable_retrieve(cfg, name, "identifier");
 	modem_pvt_t *pvt;
 	int new = 0;
 
-	if ((pvt = find_modem(name))) {
+	/* Pvts are keyed (hashed) by the configured identifier, NOT the
+	 * section name: the identifier is what device resolution looks up,
+	 * and mutating the hash key after ao2_link would corrupt bucket
+	 * placement. Looking up by identifier also makes reload find the
+	 * existing pvt instead of recreating it (which used to orphan live
+	 * GObject signal closures). */
+	if (ast_strlen_zero(identifier)) {
+		ast_log(LOG_WARNING, "Modem section '%s' has no identifier; skipping\n", name);
+		return;
+	}
+
+	if ((pvt = find_modem(identifier))) {
 		modemmanager_pvt_lock(pvt);
 		pvt->destroy = 0;
 	} else {
 		if (!(pvt = ao2_alloc(sizeof(*pvt), modem_destructor))) {
 			return;
 		}
-		if (init_modem(pvt, name)) {
+		if (init_modem(pvt, identifier)) {
 			unref_modem(pvt);
 			return;
 		}
@@ -160,6 +172,7 @@ void build_modem(struct ast_config *cfg, const char *name)
 	}
 
 	if (new) {
+		/* Link only after the vars are stored: the identifier is final */
 		ao2_link(modems, pvt);
 	} else {
 		modemmanager_pvt_unlock(pvt);

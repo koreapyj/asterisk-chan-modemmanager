@@ -121,10 +121,17 @@ static int init_sim(sim_pvt_t *pvt, const char *identifier)
 void build_sim(struct ast_config *cfg, const char *name)
 {
 	struct ast_variable *v;
+	const char *identifier = ast_variable_retrieve(cfg, name, "identifier");
 	sim_pvt_t *pvt;
 	int new = 0;
 
-	if ((pvt = find_sim(name))) {
+	/* Keyed by configured identifier, not section name; see build_modem */
+	if (ast_strlen_zero(identifier)) {
+		ast_log(LOG_WARNING, "Sim section '%s' has no identifier; skipping\n", name);
+		return;
+	}
+
+	if ((pvt = find_sim(identifier))) {
 		modemmanager_pvt_lock(pvt);
 		set_sim_defaults(pvt);
 		pvt->destroy = 0;
@@ -132,7 +139,7 @@ void build_sim(struct ast_config *cfg, const char *name)
 		if (!(pvt = ao2_alloc(sizeof(*pvt), sim_destructor))) {
 			return;
 		}
-		if (init_sim(pvt, name)) {
+		if (init_sim(pvt, identifier)) {
 			unref_sim(pvt);
 			return;
 		}
@@ -145,6 +152,7 @@ void build_sim(struct ast_config *cfg, const char *name)
 	}
 
 	if (new) {
+		/* Link only after the vars are stored: the identifier is final */
 		ao2_link(sims, pvt);
 	} else {
 		modemmanager_pvt_unlock(pvt);
