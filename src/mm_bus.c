@@ -27,19 +27,19 @@ MMManager *mm_bus_manager(void)
 	return bus_manager;
 }
 
+GDBusConnection *mm_bus_connection(void)
+{
+	return bus_connection;
+}
+
 struct ast_threadpool *mm_bus_threadpool(void)
 {
 	return bus_pool;
 }
 
-void mm_bus_push_context(void)
+GMainContext *mm_bus_context(void)
 {
-	g_main_context_push_thread_default(bus_context);
-}
-
-void mm_bus_pop_context(void)
-{
-	g_main_context_pop_thread_default(bus_context);
+	return bus_context;
 }
 
 static void *bus_thread_fn(void *data)
@@ -74,14 +74,20 @@ int mm_bus_start(void)
 
 	/* Create the connection and manager with our context as thread-default
 	 * so every proxy the object manager hands out dispatches its signals
-	 * on our loop thread. */
-	mm_bus_push_context();
+	 * on our loop thread. This is the ONLY safe moment to push the
+	 * context from this thread: the loop thread has not started yet, so
+	 * g_main_context_push_thread_default can still acquire it. Once
+	 * g_main_loop_run owns the context, pushing from any other thread
+	 * fails its 'acquired_context' assertion and silently no-ops --
+	 * anything needing the context after this point must run ON the loop
+	 * thread (g_main_context_invoke). */
+	g_main_context_push_thread_default(bus_context);
 	bus_connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
 	if (!error) {
 		bus_manager = mm_manager_new_sync(bus_connection,
 			G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE, NULL, &error);
 	}
-	mm_bus_pop_context();
+	g_main_context_pop_thread_default(bus_context);
 
 	if (error) {
 		ast_log(LOG_ERROR, "Failed to reach ModemManager on the system bus - (%d) %s\n",

@@ -188,11 +188,7 @@ static struct ast_channel *modemmanager_request(const char *type, struct ast_for
 
 	call_props = mm_call_properties_new();
 	mm_call_properties_set_number(call_props, number);
-	/* Bind the new MMCall proxy to the module context so its signals
-	 * dispatch on our GMainLoop thread. */
-	mm_bus_push_context();
 	call = mm_modem_voice_create_call_sync(voice, call_props, NULL, &error);
-	mm_bus_pop_context();
 	g_object_unref(call_props);
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to create call - (%d) %s\n",

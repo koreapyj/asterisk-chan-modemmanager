@@ -14,11 +14,15 @@
  *
  * A private GMainContext is used instead of the global default context:
  * other modules loaded into the same Asterisk process may also use GLib,
- * and two threads cannot iterate one context. Every proxy this module
- * creates must be bound to this context so its signals dispatch on our
- * loop thread — use mm_bus_push_context()/mm_bus_pop_context() around
- * any libmm-glib call that constructs proxies (list_calls, create_call,
- * list_messages, ...) when calling from a non-loop thread.
+ * and two threads cannot iterate one context.
+ *
+ * Signal delivery contract: proxies created before the loop thread
+ * starts (the manager and its interface proxies) dispatch on the loop.
+ * Proxies constructed later from other threads (create_call_sync,
+ * list_*_sync results) do NOT deliver GObject signals reliably — treat
+ * them as method/property handles only, and receive signals through
+ * connection-level subscriptions made on the loop thread instead (see
+ * mm_bus_context()).
  */
 
 #ifndef CHAN_MM_BUS_H
@@ -45,11 +49,22 @@ void mm_bus_stop(void);
 /*! \brief The MMManager (borrowed reference, valid between start/stop) */
 MMManager *mm_bus_manager(void);
 
+/*! \brief The system bus connection (borrowed reference) */
+GDBusConnection *mm_bus_connection(void);
+
 /*! \brief Threadpool backing the per-modem serializers */
 struct ast_threadpool *mm_bus_threadpool(void);
 
-/*! \brief Bind the module's GMainContext to the calling thread */
-void mm_bus_push_context(void);
-void mm_bus_pop_context(void);
+/*!
+ * \brief The module's private GMainContext (borrowed).
+ *
+ * The loop thread OWNS this context: g_main_context_push_thread_default
+ * from any other thread fails its acquire assertion and silently no-ops,
+ * binding whatever it "wrapped" to the dead global default context.
+ * Anything that must dispatch on the loop (signal subscriptions, source
+ * attachment) has to execute ON the loop thread via
+ * g_main_context_invoke(mm_bus_context(), ...).
+ */
+GMainContext *mm_bus_context(void);
 
 #endif /* CHAN_MM_BUS_H */

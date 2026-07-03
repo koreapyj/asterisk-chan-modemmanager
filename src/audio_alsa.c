@@ -21,8 +21,8 @@
 /*! \brief Frame length in milliseconds (one Asterisk voice frame per period) */
 #define FRAME_MS         20
 
-/*! \brief Periods in the ALSA ring buffer (4 x 20ms = 80ms of resilience) */
-#define ALSA_PERIODS     4
+/*! \brief Periods in the ALSA ring buffer (8 x 20ms = 160ms of resilience) */
+#define ALSA_PERIODS     8
 
 /*!
  * \brief Recover an ALSA PCM from xrun/suspend.
@@ -85,7 +85,13 @@ static int alsa_open_pcm(snd_pcm_t **out, const char *device, snd_pcm_stream_t d
 	snd_pcm_uframes_t buffer = period * ALSA_PERIODS;
 	int err;
 
-	err = snd_pcm_open(&pcm, device, dir, 0);
+	/* Playback is NONBLOCK: a stalled device (the modem's UAC stops
+	 * draining when its PCM stream pauses, cf. the +QPCMV flow-control
+	 * URCs) must never wedge the caller -- the write path runs on the
+	 * Asterisk bridge thread, and a blocked writei there freezes the
+	 * whole call in both directions. Late frames are dropped instead. */
+	err = snd_pcm_open(&pcm, device, dir,
+		dir == SND_PCM_STREAM_PLAYBACK ? SND_PCM_NONBLOCK : 0);
 	if (err < 0) {
 		ast_log(LOG_ERROR, "Failed to open ALSA device '%s' (%s): %s\n",
 			device, dir == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
@@ -113,7 +119,7 @@ static int alsa_open_pcm(snd_pcm_t **out, const char *device, snd_pcm_stream_t d
 	if ((err = snd_pcm_sw_params_current(pcm, sw)) < 0
 		|| (err = snd_pcm_sw_params_set_avail_min(pcm, sw, period)) < 0
 		|| (err = snd_pcm_sw_params_set_start_threshold(pcm, sw,
-			dir == SND_PCM_STREAM_PLAYBACK ? period : 1)) < 0
+			dir == SND_PCM_STREAM_PLAYBACK ? 2 * period : 1)) < 0
 		|| (err = snd_pcm_sw_params(pcm, sw)) < 0) {
 		ast_log(LOG_WARNING, "Failed to set ALSA sw params on '%s': %s\n",
 			device, snd_strerror(err));
@@ -411,18 +417,25 @@ int alsa_write_frame(modem_pvt_t *modem, struct ast_frame *frame)
 {
 	snd_pcm_sframes_t n;
 
-	/* pcm_lock only: a blocking writei must never stall the ao2 lock */
 	ast_mutex_lock(&modem->pcm_lock);
 	if (modem->playback_pcm == NULL) {
 		ast_mutex_unlock(&modem->pcm_lock);
 		return 0;
 	}
 	n = snd_pcm_writei(modem->playback_pcm, frame->data.ptr, frame->samples);
+	if (n == -EAGAIN) {
+		/* Device not draining (UAC flow control): drop the frame rather
+		 * than block the bridge thread. Audio resumes when it drains. */
+		ast_mutex_unlock(&modem->pcm_lock);
+		ast_debug(2, "ALSA playback full on modem '%s'; frame dropped\n",
+			modem->identifier);
+		return 0;
+	}
 	if (n < 0 && !alsa_pcm_recover(modem->playback_pcm, n)) {
 		n = snd_pcm_writei(modem->playback_pcm, frame->data.ptr, frame->samples);
 	}
 	ast_mutex_unlock(&modem->pcm_lock);
-	if (n < 0) {
+	if (n < 0 && n != -EAGAIN) {
 		ast_log(LOG_WARNING, "ALSA playback failed: %s\n", snd_strerror(n));
 		return -1;
 	}

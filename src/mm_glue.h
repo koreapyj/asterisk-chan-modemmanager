@@ -126,6 +126,8 @@ typedef struct modem_pvt {
 	gulong sig_call_state_changed;
 	gulong sig_call_notify;
 	gulong sig_call_dtmf;
+	/*! Raw D-Bus StateChanged subscription for the current call (0 = none) */
+	guint sub_call_state;
 	/*! Last call state acted upon (dedupes signal vs property-notify) */
 	int last_call_state;
 	/*! Serialized taskprocessor: all blocking work for this modem */

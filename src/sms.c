@@ -178,9 +178,7 @@ static int task_message_added(void *data)
 		goto done;
 	}
 
-	mm_bus_push_context();
 	messages = mm_modem_messaging_list_sync(messaging, NULL, &error);
-	mm_bus_pop_context();
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to list messages - (%d) %s\n",
 			error->code, error->message);
@@ -255,9 +253,7 @@ static int task_rescan_stored(void *data)
 		goto done;
 	}
 
-	mm_bus_push_context();
 	messages = mm_modem_messaging_list_sync(messaging, NULL, &error);
-	mm_bus_pop_context();
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to list stored messages - (%d) %s\n",
 			error->code, error->message);

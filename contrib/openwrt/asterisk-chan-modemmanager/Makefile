@@ -57,7 +57,20 @@ define Package/asterisk-chan-modemmanager
   CATEGORY:=Network
   TITLE:=ModemManager channel driver for Asterisk
   URL:=https://github.com/koreapyj/asterisk-chan-modemmanager
-  DEPENDS:=asterisk +glib2 +modemmanager +alsa-lib +libcurl
+  # Beyond the link-time libraries: kmod-usb-audio provides /dev/snd for
+  # the modem's USB audio function (the driver's whole audio path), and
+  # OpenWrt splits the asterisk modules every real call needs into
+  # separate packages (verified on hardware: without the bridge and
+  # codec packages calls connect but carry no audio).
+  # @AUDIO_SUPPORT/@USB_SUPPORT: alsa-lib and kmod-usb-audio only exist
+  # on targets with those features; without them the driver is unusable
+  # (and unbuildable) anyway.
+  DEPENDS:=@AUDIO_SUPPORT @USB_SUPPORT \
+	asterisk +glib2 +modemmanager +alsa-lib +libcurl \
+	+kmod-usb-audio \
+	+asterisk-bridge-simple +asterisk-bridge-native-rtp \
+	+asterisk-bridge-softmix \
+	+asterisk-codec-ulaw +asterisk-codec-alaw +asterisk-codec-resample
 endef
 
 define Package/asterisk-chan-modemmanager/description
@@ -101,6 +114,9 @@ if [ -z "$${IPKG_INSTROOT}" ]; then
   echo "If ModemManager claims every AT port, free one for init_commands with"
   echo "an ID_MM_PORT_IGNORE udev rule (MM parses /lib/udev/rules.d itself on"
   echo "OpenWrt) and point init_port at it; see modemmanager.conf."
+  echo "Optional extras per deployment: asterisk-pjsip (SIP endpoints),"
+  echo "asterisk-format-wav (recordings), asterisk-app-mixmonitor,"
+  echo "asterisk-res-clioriginate (CLI 'channel originate')."
 fi
 exit 0
 endef

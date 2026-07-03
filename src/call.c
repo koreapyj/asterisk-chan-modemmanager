@@ -33,12 +33,113 @@ static void sim_closure_unref(gpointer data, GClosure *closure)
 static void on_call_state_changed(MMCall *call, MMCallState old, MMCallState new,
 	MMCallStateReason reason, sim_pvt_t *sim);
 static void on_call_state_notify(GObject *object, GParamSpec *pspec, gpointer data);
+static void handle_call_state(MMCall *call, MMCallState new, MMCallStateReason reason,
+	sim_pvt_t *sim);
+
+/*!
+ * \brief Raw D-Bus StateChanged callback; dispatched on the GMainLoop
+ * thread because the subscription itself is made on that thread
+ * (do_call_subscribe via g_main_context_invoke).
+ *
+ * MMCall proxies created after the loop thread owns the module context
+ * never deliver GObject signals: binding them from another thread is
+ * impossible (g_main_context_push_thread_default fails its acquire
+ * assertion once the loop runs) so they capture the never-iterated
+ * global default context. Verified live: dbus-monitor saw StateChanged
+ * while both proxy signal paths stayed silent. Subscribing at the
+ * connection level, on the loop thread, sidesteps proxies entirely.
+ */
+static void on_raw_call_state_changed(GDBusConnection *connection, const gchar *sender,
+	const gchar *path, const gchar *interface, const gchar *signal,
+	GVariant *parameters, gpointer data)
+{
+	sim_pvt_t *sim = data;
+	modem_pvt_t *modem = sim_grab_modem(sim);
+	MMCall *call = NULL;
+	gint32 old_state = 0, new_state = 0;
+	guint32 reason = 0;
+
+	if (!modem) {
+		return;
+	}
+	modemmanager_pvt_lock(modem);
+	if (modem->call && !g_strcmp0(mm_call_get_path(modem->call), path)) {
+		call = g_object_ref(modem->call);
+	}
+	modemmanager_pvt_unlock(modem);
+	unref_modem(modem);
+	if (!call) {
+		return;
+	}
+
+	g_variant_get(parameters, "(iiu)", &old_state, &new_state, &reason);
+	ast_debug(1, "Raw StateChanged %d -> %d (reason %u) at %s\n",
+		old_state, new_state, reason, path);
+	handle_call_state(call, new_state, reason, sim);
+	g_object_unref(call);
+}
+
+static void sub_sim_unref(gpointer data)
+{
+	unref_sim(data);
+}
+
+/*! Carries a pending StateChanged subscription onto the loop thread */
+struct call_subscribe_ctx {
+	modem_pvt_t *modem;
+	sim_pvt_t *sim;
+	char *path;
+};
+
+/*!
+ * \brief Runs ON the GMainLoop thread (g_main_context_invoke): only there
+ * is the module context the thread-default, so only there does
+ * g_dbus_connection_signal_subscribe capture the right dispatch context.
+ */
+static gboolean do_call_subscribe(gpointer data)
+{
+	struct call_subscribe_ctx *ctx = data;
+	guint id;
+
+	id = g_dbus_connection_signal_subscribe(mm_bus_connection(),
+		"org.freedesktop.ModemManager1",
+		"org.freedesktop.ModemManager1.Call", "StateChanged",
+		ctx->path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+		on_raw_call_state_changed, ref_sim(ctx->sim), sub_sim_unref);
+
+	modemmanager_pvt_lock(ctx->modem);
+	if (ctx->modem->call
+		&& !g_strcmp0(mm_call_get_path(ctx->modem->call), ctx->path)) {
+		ctx->modem->sub_call_state = id;
+		modemmanager_pvt_unlock(ctx->modem);
+	} else {
+		/* The call was detached before we got here */
+		modemmanager_pvt_unlock(ctx->modem);
+		g_dbus_connection_signal_unsubscribe(mm_bus_connection(), id);
+	}
+
+	unref_modem(ctx->modem);
+	unref_sim(ctx->sim);
+	ast_free(ctx->path);
+	ast_free(ctx);
+	return G_SOURCE_REMOVE;
+}
 
 void call_attach(modem_pvt_t *modem, MMCall *call, sim_pvt_t *sim)
 {
+	struct call_subscribe_ctx *ctx;
+
 	call_detach(modem);
 	modem->call = g_object_ref(call);
 	modem->last_call_state = mm_call_get_state(call);
+
+	ctx = ast_calloc(1, sizeof(*ctx));
+	if (ctx) {
+		ctx->modem = ref_modem(modem);
+		ctx->sim = ref_sim(sim);
+		ctx->path = ast_strdup(mm_call_get_path(call));
+		g_main_context_invoke(mm_bus_context(), do_call_subscribe, ctx);
+	}
 	modem->sig_call_state_changed = g_signal_connect_data(call, "state-changed",
 		G_CALLBACK(on_call_state_changed), ref_sim(sim), sim_closure_unref, 0);
 	/* Belt and braces: some proxy/context combinations deliver call state
@@ -64,6 +165,10 @@ void call_detach(modem_pvt_t *modem)
 	if (modem->sig_call_notify) {
 		g_signal_handler_disconnect(modem->call, modem->sig_call_notify);
 		modem->sig_call_notify = 0;
+	}
+	if (modem->sub_call_state) {
+		g_dbus_connection_signal_unsubscribe(mm_bus_connection(), modem->sub_call_state);
+		modem->sub_call_state = 0;
 	}
 	if (modem->sig_call_dtmf) {
 		g_signal_handler_disconnect(modem->call, modem->sig_call_dtmf);
@@ -260,11 +365,7 @@ static int task_call_added(void *data)
 		goto done;
 	}
 
-	/* Bind new MMCall proxies to the module context so their signals
-	 * dispatch on our GMainLoop thread. */
-	mm_bus_push_context();
 	calls = mm_modem_voice_list_calls_sync(voice, NULL, &error);
-	mm_bus_pop_context();
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to list calls - (%d) %s\n",
 			error->code, error->message);

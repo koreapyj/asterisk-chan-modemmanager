@@ -281,9 +281,7 @@ static void resolve_object(MMObject *obj)
 		goto done;
 	}
 
-	mm_bus_push_context();
 	mm_sim = mm_modem_get_sim_sync(mm_modem, NULL, &error);
-	mm_bus_pop_context();
 	if (error) {
 		ast_log(LOG_WARNING, "Failed to get SIM of modem '%s' - (%d) %s\n",
 			modem->identifier, error->code, error->message);
